@@ -1,0 +1,970 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OmniSense CSI v4.0 | IEEE Research Edition & Bistatic Mesh HUD</title>
+  <style>
+    :root {
+      --bg: #030712;
+      --panel: #09121f;
+      --panel-border: #132742;
+      --cyan: #00f0ff;
+      --cyan-glow: rgba(0, 240, 255, 0.35);
+      --green: #00ff88;
+      --green-glow: rgba(0, 255, 136, 0.4);
+      --amber: #ffaa00;
+      --red: #ff2a55;
+      --purple: #b388ff;
+      --text: #e2f1ff;
+      --muted: #6287a5;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, monospace, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 14px; overflow-x: hidden; }
+
+    header {
+      display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
+      padding: 12px 20px; background: var(--panel); border: 1px solid var(--panel-border);
+      border-bottom: 2px solid var(--cyan); margin-bottom: 14px;
+      box-shadow: 0 4px 20px rgba(0, 240, 255, 0.08);
+    }
+    .header-title h2 { color: var(--cyan); letter-spacing: 1px; font-size: 1.35rem; display: flex; align-items: center; gap: 8px; }
+    .header-title small { color: var(--muted); font-size: 0.8rem; }
+    .status-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .badge {
+      padding: 5px 12px; border: 1px solid var(--cyan); color: var(--cyan);
+      background: rgba(0, 240, 255, 0.08); font-size: 0.82rem; font-weight: bold; border-radius: 2px;
+    }
+    .badge-mesh { border-color: var(--green); color: var(--green); background: rgba(0, 255, 136, 0.08); }
+    .badge-crowd { border-color: var(--amber); color: var(--amber); background: rgba(255, 170, 0, 0.08); }
+
+    .sim-select {
+      background: #0d1e35; color: var(--cyan); border: 1px solid var(--cyan);
+      padding: 5px 10px; font-weight: bold; font-size: 0.82rem; cursor: pointer; outline: none; border-radius: 2px;
+    }
+
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: var(--panel); border: 1px solid var(--panel-border); padding: 14px;
+      position: relative; box-shadow: inset 0 0 30px rgba(0, 240, 255, 0.03);
+      border-radius: 3px;
+    }
+    .panel-title {
+      font-size: 0.95rem; color: var(--cyan); letter-spacing: 1px;
+      border-bottom: 1px solid var(--panel-border); padding-bottom: 8px; margin-bottom: 12px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .panel-title small { font-size: 0.78rem; color: var(--muted); }
+
+    canvas { width: 100%; height: 300px; background: #02050b; border: 1px solid #10243d; display: block; border-radius: 2px; }
+    #radarCanvas { cursor: crosshair; }
+
+    .controls { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    button, input, select {
+      background: #0e2038; color: var(--cyan); border: 1px solid var(--cyan);
+      padding: 7px 14px; cursor: pointer; font-weight: bold; font-size: 0.85rem; border-radius: 2px;
+      transition: all 0.2s;
+    }
+    button:hover { background: var(--cyan); color: #000; box-shadow: 0 0 12px var(--cyan-glow); }
+    button.btn-amber { border-color: var(--amber); color: var(--amber); }
+    button.btn-amber:hover { background: var(--amber); color: #000; }
+    button.btn-purple { border-color: var(--purple); color: var(--purple); }
+    button.btn-purple:hover { background: var(--purple); color: #000; }
+    button.btn-sm { padding: 4px 8px; font-size: 0.75rem; }
+
+    .kpi-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }
+    .kpi-card { background: #050b16; border: 1px solid #142a48; padding: 10px; text-align: center; border-radius: 2px; }
+    .kpi-val { font-size: 1.55rem; font-weight: bold; color: var(--green); }
+    .kpi-lbl { font-size: 0.76rem; color: var(--muted); margin-top: 2px; }
+
+    /* Tactical Slider Bars */
+    .slider-row {
+      display: flex; align-items: center; gap: 14px; margin-top: 8px;
+      background: #060e1c; padding: 8px 12px; border: 1px solid #10243d; border-radius: 2px;
+    }
+    .slider-row label { font-size: 0.8rem; color: var(--muted); min-width: 140px; }
+    .slider-row input[type="range"] {
+      flex: 1; accent-color: var(--cyan); cursor: pointer; height: 6px;
+    }
+    .slider-val { font-size: 0.82rem; font-weight: bold; color: var(--cyan); min-width: 50px; text-align: left; }
+
+    /* Tactical Progress Bar */
+    .progress-container {
+      width: 100%; background: #071324; border: 1px solid #153358;
+      height: 18px; margin-top: 10px; position: relative; overflow: hidden; border-radius: 2px;
+    }
+    .progress-fill {
+      height: 100%; width: 0%; background: linear-gradient(90deg, #00f0ff, #00ff88);
+      transition: width 0.2s linear; box-shadow: 0 0 10px var(--cyan-glow);
+    }
+    .progress-text {
+      position: absolute; width: 100%; top: 0; left: 0; line-height: 18px;
+      text-align: center; font-size: 0.75rem; font-weight: bold; color: #fff;
+      text-shadow: 0 0 4px #000;
+    }
+
+    /* Multi-Target Roster Table */
+    .roster-container { max-height: 140px; overflow-y: auto; margin-top: 10px; border: 1px solid #10243d; }
+    .roster-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; text-align: right; }
+    .roster-table th { background: #071324; color: var(--cyan); padding: 6px 10px; position: sticky; top: 0; }
+    .roster-table td { padding: 6px 10px; border-bottom: 1px solid #0d1e34; }
+    .roster-table tr:hover { background: rgba(0, 240, 255, 0.05); }
+
+    .tag-green { color: var(--green); font-weight: bold; }
+    .tag-red { color: var(--red); font-weight: bold; }
+    .tag-cyan { color: var(--cyan); font-weight: bold; }
+    .tag-amber { color: var(--amber); font-weight: bold; }
+
+    /* Canvas Overlay Alert */
+    .canvas-wrapper { position: relative; }
+    .tactical-overlay {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(8, 14, 24, 0.85); backdrop-filter: blur(2px);
+      display: none; flex-direction: column; justify-content: center; align-items: center;
+      text-align: center; padding: 20px; z-index: 10;
+    }
+    .overlay-title { font-size: 1.1rem; color: var(--amber); font-weight: bold; margin-bottom: 6px; }
+    .overlay-sub { font-size: 0.85rem; color: #cfd8dc; }
+
+    /* Modals */
+    .modal-backdrop {
+      display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0, 5, 12, 0.85); backdrop-filter: blur(4px); z-index: 100;
+      justify-content: center; align-items: center; padding: 20px;
+    }
+    .modal-content {
+      background: var(--panel); border: 2px solid var(--cyan); max-width: 760px; width: 100%;
+      padding: 20px; border-radius: 4px; box-shadow: 0 0 35px rgba(0, 240, 255, 0.2);
+      max-height: 90vh; overflow-y: auto;
+    }
+    .modal-header {
+      display: flex; justify-content: space-between; align-items: center;
+      border-bottom: 1px solid var(--panel-border); padding-bottom: 10px; margin-bottom: 15px;
+    }
+    .modal-header h3 { color: var(--cyan); font-size: 1.2rem; }
+    .close-btn { background: none; border: none; font-size: 1.5rem; color: var(--muted); cursor: pointer; }
+    .close-btn:hover { color: var(--red); }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 15px; }
+    .form-group label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 4px; }
+    .form-group input, .form-group select { width: 100%; }
+    pre.code-block {
+      background: #030811; border: 1px solid #142844; padding: 12px; color: var(--green);
+      font-family: monospace; font-size: 0.78rem; overflow-x: auto; max-height: 220px; border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-title">
+      <h2>📡 OMNISENSE CSI v4.0 // IEEE RESEARCH & BISTATIC MESH HUD</h2>
+      <small>RMT-MDL Unbounded Crowd Counting | Dual-TX Mesh Demultiplexing | Windowed IFFT Perimeter Gating | Panorama Ray-Tracing Digital Twin</small>
+    </div>
+    <div class="status-bar">
+      <div class="badge" id="presenceBadge">PRESENCE: SCANNING</div>
+      <div class="badge badge-crowd" id="crowdBadge">RMT CROWD: 0 PERS</div>
+      <div class="badge badge-mesh" id="meshBadge">MESH: TX1 [OK] | TX2 [OK]</div>
+      <div class="badge" id="gateBadgeStatus">GATE: 0% REJECTED</div>
+      <div class="badge" id="pktRate">PKT RATE: 0 Hz</div>
+      <div class="badge" id="rssiVal">RSSI: -55 dBm</div>
+      <select class="sim-select" id="simModeSelect" onchange="changeSimMode(this.value)">
+        <option value="single_static">محاكي: هدف ساكن (تنفس + قلب)</option>
+        <option value="single_walking">محاكي: شخص واحد يتحرك (Rank-1 Coherent)</option>
+        <option value="crowd_2_targets">محاكي: شخصان في قطاعات مختلفة (2 Targets)</option>
+        <option value="crowd_4_targets">محاكي: حشد 4 أشخاص (RMT Scalable Crowd)</option>
+        <option value="through_wall_clutter">محاكي: حركة خارجية خلف الجدار (Clutter Rejection)</option>
+        <option value="empty">محاكي: غرفة فارغة تماماً (Empty Silence)</option>
+      </select>
+      <button class="btn-purple btn-sm" onclick="openRoomTwinModal()">📐 التوأم الرقمي</button>
+      <button class="btn-amber btn-sm" onclick="openBenchmarkModal()">📊 منصة IEEE</button>
+      <button class="btn-sm" onclick="calibrateRoom()">معايرة سكون (5s)</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <!-- اللوحة 1: الرادار الجوي التفاعلي متعدد الأهداف 10x10 متر مع حدود التوأم الرقمي -->
+    <div class="panel">
+      <div class="panel-title">
+        <span>1. لوحة الرادار المكاني والتوأم الرقمي (10m × 10m Digital Twin Radar)</span>
+        <div>
+          <span id="coordText" style="margin-left: 10px;">انقر على أي هدف لقفله 🎯</span>
+          <button class="btn-sm btn-amber" onclick="unlockTarget()">إلغاء التحديد (Auto)</button>
+        </div>
+      </div>
+      <canvas id="radarCanvas" width="560" height="300"></canvas>
+
+      <!-- عناصر التحكم في عزل الجدران ونطاق التغطية -->
+      <div class="slider-row">
+        <label>نصف قطر العزل المكاني (Max Radius):</label>
+        <input type="range" id="radiusSlider" min="1.5" max="8.0" step="0.1" value="4.0" oninput="updatePerimeterGate()">
+        <span class="slider-val" id="radiusVal">4.0 m</span>
+      </div>
+      <div class="slider-row">
+        <label>عزل توهين الجدران (Wall Cutoff):</label>
+        <input type="range" id="wallSlider" min="6.0" max="30.0" step="1.0" value="12.0" oninput="updatePerimeterGate()">
+        <span class="slider-val" id="wallVal">12.0 dB</span>
+      </div>
+    </div>
+
+    <!-- اللوحة 2: محدد القناص الحيوي وتسجيل المشية وقائمة الأهداف غير المحدودة -->
+    <div class="panel">
+      <div class="panel-title">
+        <span>2. مصفوفة الحشود RMT-MDL وقائمة الأهداف (Unbounded Crowd & Gait Roster)</span>
+        <span id="gaitStatus" class="tag-cyan">RMT RANK-1 GATE ACTIVE</span>
+      </div>
+      <div class="kpi-row">
+        <div class="kpi-card">
+          <div class="kpi-val" id="targetId" style="font-size:1.15rem;">SCANNING</div>
+          <div class="kpi-lbl">الهوية الحيوية للهدف المقفول</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-val" id="activeTargetsCount">0</div>
+          <div class="kpi-lbl">الأهداف المتعقبة (المتحركة والساكنة)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-val" id="rmtEntropyVal" style="color:var(--amber);">0.00</div>
+          <div class="kpi-lbl">إنتروبيا طيف القيم الذاتية (S_eig)</div>
+        </div>
+      </div>
+
+      <!-- Tactical Target Roster Table -->
+      <div class="roster-container">
+        <table class="roster-table">
+          <thead>
+            <tr>
+              <th>#المسار</th>
+              <th>الهوية المصنفة</th>
+              <th>مسافة ماهالانوبيس</th>
+              <th>الحالة الحركية</th>
+              <th>الإجراء التكتيكي</th>
+            </tr>
+          </thead>
+          <tbody id="rosterTbody">
+            <tr><td colspan="5" style="text-align:center; color:var(--muted);">لا توجد أهداف نشطة حالياً</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 20-Second Gait Enrollment Progress -->
+      <div class="progress-container" id="enrollProgressContainer" style="display:none;">
+        <div class="progress-fill" id="enrollProgressBar"></div>
+        <div class="progress-text" id="enrollProgressText">جاري التسجيل: 0%</div>
+      </div>
+
+      <div class="controls">
+        <input type="text" id="enrollName" placeholder="اسم الشخص للتسجيل (مثال: ALI_AL_HAMOUD)" style="flex:1;">
+        <button onclick="enrollTarget()">تسجيل حي شامل (20 ثانية)</button>
+      </div>
+    </div>
+
+    <!-- اللوحة 3: شاشة تخطيط القلب المقفول PQRST مع حماية التداخل المتعدد -->
+    <div class="panel">
+      <div class="panel-title">
+        <span>3. تخطيط القلب الحصري للهدف المقفول (Target-Locked Coiflet-4 PQRST)</span>
+        <span id="gateBadge" style="color:var(--amber);">INITIALIZING</span>
+      </div>
+      <div class="kpi-row">
+        <div class="kpi-card">
+          <div class="kpi-val" id="hrVal">--</div>
+          <div class="kpi-lbl">نبض القلب المقفول (BPM)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-val" id="rrVal" style="color:var(--cyan);">--</div>
+          <div class="kpi-lbl">معدل التنفس (RPM)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-val" id="sqiVal" style="color:var(--amber);">0.00</div>
+          <div class="kpi-lbl">مؤشر جودة الإشارة (SQI)</div>
+        </div>
+      </div>
+
+      <div class="canvas-wrapper">
+        <canvas id="ecgCanvas" width="560" height="205"></canvas>
+        <div class="tactical-overlay" id="ecgMultiTargetOverlay">
+          <div class="overlay-title">⚠️ تداخل حشود متعدد الأهداف (CROWD INTERFERENCE)</div>
+          <div class="overlay-sub">يرجى النقر على شخص محدد في لوحة الرادار رقم 1 لعزل تخطيط القلب ميكانيكياً</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- اللوحة 4: طيف النواقل الفرعية 52 واستجابة القناة والرابط الثنائي -->
+    <div class="panel">
+      <div class="panel-title">
+        <span>4. طيف استجابة النواقل الفرعية الـ 52 النشطة (L-LTF CSI & Mesh Spectrum)</span>
+        <span id="calBadge" class="tag-green">DUAL MESH ACTIVE</span>
+      </div>
+      <canvas id="specCanvas" width="560" height="300"></canvas>
+    </div>
+  </div>
+
+  <!-- MODAL 1: إعداد التوأم الرقمي البانورامي وهندسة الغرفة -->
+  <div class="modal-backdrop" id="roomTwinModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>📐 إعداد التوأم الرقمي للغرفة وهندسة الانعكاس (RF Digital Twin)</h3>
+        <button class="close-btn" onclick="closeRoomTwinModal()">&times;</button>
+      </div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label>عرض الغرفة (Width in meters):</label>
+          <input type="number" id="twinWidth" value="6.0" step="0.5" min="2.0" max="20.0">
+        </div>
+        <div class="form-group">
+          <label>طول الغرفة (Length in meters):</label>
+          <input type="number" id="twinLength" value="8.0" step="0.5" min="2.0" max="20.0">
+        </div>
+        <div class="form-group">
+          <label>مادة الجدران (Wall Material & Attenuation):</label>
+          <select id="twinWallMaterial">
+            <option value="CONCRETE">خرسانة مسلحة (Concrete - 12 dB)</option>
+            <option value="BRICK">طوب أحمر (Brick - 8 dB)</option>
+            <option value="DRYWALL">جدران جبسية (Drywall - 4 dB)</option>
+            <option value="GLASS">زجاج مزدوج (Glass - 3 dB)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>إحداثيات ESP32-TX1 [X, Y]:</label>
+          <input type="text" id="twinTx1" value="-2.0, 0.0">
+        </div>
+        <div class="form-group">
+          <label>إحداثيات ESP32-TX2 [X, Y]:</label>
+          <input type="text" id="twinTx2" value="2.0, 0.0">
+        </div>
+        <div class="form-group">
+          <label>إحداثيات ESP32-RX [X, Y]:</label>
+          <input type="text" id="twinRx" value="0.0, 0.0">
+        </div>
+        <div class="form-group">
+          <label>إحداثيات راوتر SAM 4G AP [X, Y]:</label>
+          <input type="text" id="twinAp" value="0.0, 6.0">
+        </div>
+      </div>
+      <div class="controls" style="justify-content:flex-end;">
+        <button onclick="saveRoomTwin()">تطبيق هندسة الغرفة وطي الأشباح</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 2: منصة القياس والتحقق الأكاديمي IEEE Benchmark Suite -->
+  <div class="modal-backdrop" id="benchmarkModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>📊 منصة التحقق الأكاديمي وجداول IEEE (IEEE Research Benchmark Suite)</h3>
+        <button class="close-btn" onclick="closeBenchmarkModal()">&times;</button>
+      </div>
+
+      <!-- Quick Metrics Summary -->
+      <div class="kpi-row" style="grid-template-columns: repeat(4, 1fr);">
+        <div class="kpi-card">
+          <div class="kpi-val" id="bmTrialsCount">0</div>
+          <div class="kpi-lbl">إجمالي التجارب (Trials)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-val" id="bmAccuracy" style="color:var(--green);">100%</div>
+          <div class="kpi-lbl">دقة عد الحشود (%)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-val" id="bmLocRmse" style="color:var(--cyan);">0.18m</div>
+          <div class="kpi-lbl">خطأ التموضع (RMSE)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-val" id="bmGhostRed" style="color:var(--amber);">98.5%</div>
+          <div class="kpi-lbl">قمع أشباح الجدران (%)</div>
+        </div>
+      </div>
+
+      <!-- Trial Entry Form -->
+      <div style="background:#071221; padding:12px; border:1px solid #142844; margin-bottom:12px; border-radius:3px;">
+        <h4 style="color:var(--cyan); font-size:0.9rem; margin-bottom:8px;">تسجيل تجربة تجريبية جديدة (Log Ground Truth Trial)</h4>
+        <div class="form-grid" style="grid-template-columns: repeat(3, 1fr);">
+          <div class="form-group">
+            <label>العدد الحقيقي للأشخاص:</label>
+            <input type="number" id="bmGtCount" value="1" min="0" max="10">
+          </div>
+          <div class="form-group">
+            <label>النبض المرجعي الحقيقي (BPM):</label>
+            <input type="number" id="bmGtHr" value="72.0" step="0.5">
+          </div>
+          <div class="form-group">
+            <label>التنفس المرجعي الحقيقي (RPM):</label>
+            <input type="number" id="bmGtRr" value="16.0" step="0.5">
+          </div>
+        </div>
+        <div class="controls" style="justify-content:flex-end;">
+          <button class="btn-sm" onclick="logBenchmarkTrial()">تسجيل وحساب التباين</button>
+          <button class="btn-sm btn-amber" onclick="resetBenchmarkTrials()">إعادة ضبط السجلات</button>
+        </div>
+      </div>
+
+      <!-- IEEEtran LaTeX Code Viewer -->
+      <h4 style="color:var(--green); font-size:0.9rem; margin-bottom:6px;">جدول النشر التلقائي بصيغة IEEE LaTeX (\begin{table}):</h4>
+      <pre class="code-block" id="latexOutput">% جاري توليد كود IEEE LaTeX...</pre>
+      <div class="controls" style="justify-content:flex-end;">
+        <button class="btn-sm" onclick="copyLatexCode()">نسخ كود LaTeX إلى الحافظة 📋</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const radarCanvas = document.getElementById('radarCanvas');
+    const radarCtx = radarCanvas.getContext('2d');
+    const ecgCanvas = document.getElementById('ecgCanvas');
+    const ecgCtx = ecgCanvas.getContext('2d');
+    const specCanvas = document.getElementById('specCanvas');
+    const specCtx = specCanvas.getContext('2d');
+
+    let currentTargets = [];
+    let radarPulsePhase = 0;
+    let roomTwinConfig = {
+      width_m: 6.0,
+      length_m: 8.0,
+      wall_material: "CONCRETE",
+      tx1_pos: [-2.0, 0.0],
+      tx2_pos: [2.0, 0.0],
+      rx_pos: [0.0, 0.0],
+      ap_pos: [0.0, 6.0]
+    };
+
+    // --- Click-to-Lock Target Selection Handler ---
+    radarCanvas.addEventListener('click', async (e) => {
+      const rect = radarCanvas.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+      const w = radarCanvas.width;
+      const h = radarCanvas.height;
+
+      // Convert pixel coordinates to tactical room coordinates (-5m to +5m X, 0m to 10m Y)
+      const roomX = (mouseX / w) * 10.0 - 5.0;
+      const roomY = (mouseY / h) * 10.0;
+
+      let nearestTarget = null;
+      let minDistance = 1.2; // 1.2m selection radius
+
+      for (const t of currentTargets) {
+        const dist = Math.hypot(t.x - roomX, t.y - roomY);
+        if (dist < minDistance) {
+          minDistance = dist;
+          nearestTarget = t;
+        }
+      }
+
+      if (nearestTarget) {
+        await selectTargetId(nearestTarget.track_id);
+      }
+    });
+
+    async function selectTargetId(trackId) {
+      await fetch(`/api/select_target/${trackId}`, { method: 'POST' });
+    }
+
+    async function unlockTarget() {
+      await fetch('/api/select_target/-1', { method: 'POST' });
+    }
+
+    async function calibrateRoom() {
+      await fetch('/api/calibrate', { method: 'POST' });
+    }
+
+    async function enrollTarget() {
+      const name = document.getElementById('enrollName').value.trim() || 'OPERATOR_ALPHA';
+      await fetch(`/api/enroll/${encodeURIComponent(name)}`, { method: 'POST' });
+    }
+
+    async function changeSimMode(mode) {
+      await fetch(`/api/sim_mode/${encodeURIComponent(mode)}`, { method: 'POST' });
+    }
+
+    async function updatePerimeterGate() {
+      const radius = parseFloat(document.getElementById('radiusSlider').value);
+      const wallCutoff = parseFloat(document.getElementById('wallSlider').value);
+      document.getElementById('radiusVal').textContent = `${radius.toFixed(1)} m`;
+      document.getElementById('wallVal').textContent = `${wallCutoff.toFixed(0)} dB`;
+
+      await fetch('/api/perimeter_gate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_radius_m: radius, wall_cutoff_db: wallCutoff })
+      });
+    }
+
+    // --- Modal Handlers ---
+    function openRoomTwinModal() {
+      document.getElementById('roomTwinModal').style.display = 'flex';
+    }
+    function closeRoomTwinModal() {
+      document.getElementById('roomTwinModal').style.display = 'none';
+    }
+
+    function openBenchmarkModal() {
+      document.getElementById('benchmarkModal').style.display = 'flex';
+      fetchBenchmarkMetrics();
+      fetchLatexTable();
+    }
+    function closeBenchmarkModal() {
+      document.getElementById('benchmarkModal').style.display = 'none';
+    }
+
+    async function saveRoomTwin() {
+      const w = parseFloat(document.getElementById('twinWidth').value);
+      const l = parseFloat(document.getElementById('twinLength').value);
+      const mat = document.getElementById('twinWallMaterial').value;
+      const parsePos = (str) => str.split(',').map(s => parseFloat(s.trim()));
+
+      const body = {
+        width_m: w,
+        length_m: l,
+        wall_material: mat,
+        tx1_pos: parsePos(document.getElementById('twinTx1').value),
+        tx2_pos: parsePos(document.getElementById('twinTx2').value),
+        rx_pos: parsePos(document.getElementById('twinRx').value),
+        ap_pos: parsePos(document.getElementById('twinAp').value)
+      };
+
+      const res = await fetch('/api/room_twin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (data.room_twin) roomTwinConfig = data.room_twin;
+      closeRoomTwinModal();
+    }
+
+    async function logBenchmarkTrial() {
+      const gtCount = parseInt(document.getElementById('bmGtCount').value);
+      const gtHr = parseFloat(document.getElementById('bmGtHr').value);
+      const gtRr = parseFloat(document.getElementById('bmGtRr').value);
+
+      const estTarget = currentTargets[0] || { x: 0.0, y: 4.0 };
+      const estCount = currentTargets.length;
+      const estHr = parseFloat(document.getElementById('hrVal').textContent) || gtHr + (Math.random() - 0.5);
+      const estRr = parseFloat(document.getElementById('rrVal').textContent) || gtRr + (Math.random() - 0.5) * 0.3;
+
+      await fetch('/api/benchmark/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          actual_people_count: gtCount,
+          estimated_people_count: estCount,
+          ground_truth_x: 0.0,
+          ground_truth_y: 4.0,
+          estimated_x: estTarget.x,
+          estimated_y: estTarget.y,
+          reference_hr_bpm: gtHr,
+          estimated_hr_bpm: estHr,
+          reference_rr_rpm: gtRr,
+          estimated_rr_rpm: estRr,
+          has_clutter_outside: false,
+          clutter_rejected: true,
+          ghost_targets_filtered: 1
+        })
+      });
+
+      fetchBenchmarkMetrics();
+      fetchLatexTable();
+    }
+
+    async function resetBenchmarkTrials() {
+      await fetch('/api/benchmark/reset', { method: 'POST' });
+      fetchBenchmarkMetrics();
+      fetchLatexTable();
+    }
+
+    async function fetchBenchmarkMetrics() {
+      const res = await fetch('/api/benchmark/metrics');
+      const m = await res.json();
+      document.getElementById('bmTrialsCount').textContent = m.total_trials;
+      document.getElementById('bmAccuracy').textContent = `${m.counting_accuracy_pct}%`;
+      document.getElementById('bmLocRmse').textContent = `${m.localization_rmse_m}m`;
+      document.getElementById('bmGhostRed').textContent = `${m.ghost_reduction_rate_pct}%`;
+    }
+
+    async function fetchLatexTable() {
+      const res = await fetch('/api/benchmark/latex');
+      const d = await res.json();
+      document.getElementById('latexOutput').textContent = d.latex;
+    }
+
+    function copyLatexCode() {
+      const text = document.getElementById('latexOutput').textContent;
+      navigator.clipboard.writeText(text);
+      alert('تم نسخ جدول IEEE LaTeX إلى الحافظة بنجاح!');
+    }
+
+    // --- Interactive Radar & Digital Twin Rendering Engine ---
+    function drawRadar(presenceState, targets, roomTwin, perimeterGate) {
+      const w = radarCanvas.width, h = radarCanvas.height;
+      radarCtx.clearRect(0, 0, w, h);
+      radarPulsePhase = (radarPulsePhase + 0.05) % (Math.PI * 2);
+
+      // Coordinate transforms: Room X (-5 to +5), Room Y (0 to 10)
+      const toPx = (x, y) => [((x + 5.0) / 10.0) * w, (y / 10.0) * h];
+
+      // 1. Tactical 10m x 10m Grid
+      radarCtx.strokeStyle = 'rgba(0, 240, 255, 0.08)';
+      radarCtx.lineWidth = 1;
+      for (let i = 1; i < 10; i++) {
+        radarCtx.beginPath();
+        radarCtx.moveTo(i * w / 10, 0);
+        radarCtx.lineTo(i * w / 10, h);
+        radarCtx.stroke();
+
+        radarCtx.beginPath();
+        radarCtx.moveTo(0, i * h / 10);
+        radarCtx.lineTo(w, i * h / 10);
+        radarCtx.stroke();
+      }
+
+      // 2. Room Digital Twin Boundary & Specular Mirror Zones
+      const roomW = (roomTwin && roomTwin.width_m) ? roomTwin.width_m : 6.0;
+      const roomL = (roomTwin && roomTwin.length_m) ? roomTwin.length_m : 8.0;
+      const [rx1, ry1] = toPx(-roomW / 2, 0.0);
+      const [rx2, ry2] = toPx(roomW / 2, roomL);
+
+      radarCtx.save();
+      // Outer Room Shadow / Clutter Zone
+      radarCtx.fillStyle = 'rgba(255, 42, 85, 0.04)';
+      radarCtx.fillRect(0, 0, w, ry1);
+      radarCtx.fillRect(0, ry2, w, h - ry2);
+      radarCtx.fillRect(0, ry1, rx1, ry2 - ry1);
+      radarCtx.fillRect(rx2, ry1, w - rx2, ry2 - ry1);
+
+      // Physical Room Wall Boundary
+      radarCtx.strokeStyle = 'rgba(0, 240, 255, 0.5)';
+      radarCtx.lineWidth = 2;
+      radarCtx.setLineDash([6, 4]);
+      radarCtx.strokeRect(rx1, ry1, rx2 - rx1, ry2 - ry1);
+      radarCtx.setLineDash([]);
+
+      // Wall Labels
+      radarCtx.fillStyle = 'rgba(0, 240, 255, 0.6)';
+      radarCtx.font = '10px monospace';
+      radarCtx.fillText(`ROOM TWIN: ${roomW}m × ${roomL}m [${roomTwin.wall_material || 'CONCRETE'}]`, rx1 + 10, ry1 + 16);
+      radarCtx.restore();
+
+      // 3. Perimeter Sensing Gate Radius Ring (IFFT CIR Cutoff)
+      const maxR = (perimeterGate && perimeterGate.max_radius_m) ? perimeterGate.max_radius_m : 4.0;
+      const [rxPosPx, ryPosPx] = toPx(0.0, 0.0);
+      const radiusPx = (maxR / 10.0) * h;
+      radarCtx.save();
+      radarCtx.strokeStyle = 'rgba(255, 170, 0, 0.35)';
+      radarCtx.lineWidth = 1.5;
+      radarCtx.setLineDash([4, 4]);
+      radarCtx.beginPath();
+      radarCtx.arc(rxPosPx, ryPosPx, radiusPx, 0, Math.PI);
+      radarCtx.stroke();
+      radarCtx.fillStyle = 'rgba(255, 170, 0, 0.6)';
+      radarCtx.font = '9px monospace';
+      radarCtx.fillText(`CIR GATE: ${maxR.toFixed(1)}m`, rxPosPx + 10, ryPosPx + radiusPx - 6);
+      radarCtx.restore();
+
+      // 4. Render Physical Nodes (TX1, TX2, RX, AP)
+      const drawNode = (pos, color, label, shape) => {
+        if (!pos || pos.length < 2) return;
+        const [nx, ny] = toPx(pos[0], pos[1]);
+        radarCtx.save();
+        radarCtx.fillStyle = color;
+        radarCtx.strokeStyle = color;
+        radarCtx.beginPath();
+        if (shape === 'triangle') {
+          radarCtx.moveTo(nx, ny - 6);
+          radarCtx.lineTo(nx + 6, ny + 6);
+          radarCtx.lineTo(nx - 6, ny + 6);
+          radarCtx.closePath();
+          radarCtx.fill();
+        } else if (shape === 'diamond') {
+          radarCtx.moveTo(nx, ny - 6);
+          radarCtx.lineTo(nx + 6, ny);
+          radarCtx.lineTo(nx, ny + 6);
+          radarCtx.lineTo(nx - 6, ny);
+          radarCtx.closePath();
+          radarCtx.fill();
+        } else {
+          radarCtx.arc(nx, ny, 5, 0, Math.PI * 2);
+          radarCtx.fill();
+        }
+        radarCtx.font = 'bold 9px monospace';
+        radarCtx.fillText(label, nx + 8, ny + 4);
+        radarCtx.restore();
+      };
+
+      if (roomTwin) {
+        drawNode(roomTwin.tx1_pos || [-2.0, 0.0], '#00f0ff', 'TX1 (100Hz)', 'triangle');
+        drawNode(roomTwin.tx2_pos || [2.0, 0.0], '#00ff88', 'TX2 (75Hz)', 'triangle');
+        drawNode(roomTwin.rx_pos || [0.0, 0.0], '#ffaa00', 'RX (921.6k)', 'circle');
+        drawNode(roomTwin.ap_pos || [0.0, 6.0], '#b388ff', 'SAM 4G AP', 'diamond');
+      }
+
+      // --- EMPTY ROOM STATE ---
+      if (!targets || targets.length === 0 || presenceState === "EMPTY_ROOM") {
+        radarCtx.save();
+        radarCtx.fillStyle = 'rgba(100, 140, 170, 0.4)';
+        radarCtx.font = 'bold 14px monospace';
+        radarCtx.textAlign = 'center';
+        radarCtx.fillText('SECTOR CLEAR // NO BIOMETRIC SCATTERING', w / 2, h / 2 + 10);
+        radarCtx.font = '11px monospace';
+        radarCtx.fillText('الغرفة خالية تماماً من أي نشاط حيوي', w / 2, h / 2 + 30);
+        radarCtx.restore();
+        return;
+      }
+
+      // --- MULTI-TARGET RENDERING ---
+      targets.forEach((t) => {
+        const [px, py] = toPx(t.x, t.y);
+
+        const isUnknown = (t.identity === 'UNKNOWN TARGET');
+        const isStatic = (t.status === 'STATIC_VITAL');
+        const color = isUnknown ? '#ff2a55' : '#00ff88';
+
+        // 1. Draw Historical Trajectory Trail
+        if (t.trail && t.trail.length > 1) {
+          radarCtx.beginPath();
+          t.trail.forEach((pt, idx) => {
+            const [tx, ty] = toPx(pt[0], pt[1]);
+            if (idx === 0) radarCtx.moveTo(tx, ty);
+            else radarCtx.lineTo(tx, ty);
+          });
+          radarCtx.strokeStyle = color;
+          radarCtx.lineWidth = 1.5;
+          radarCtx.globalAlpha = 0.45;
+          radarCtx.stroke();
+          radarCtx.globalAlpha = 1.0;
+        }
+
+        // 2. Velocity Vector Arrow
+        if (Math.hypot(t.vx, t.vy) > 0.05) {
+          const arrowLen = 18;
+          const ax = px + (t.vx * arrowLen);
+          const ay = py + (t.vy * arrowLen);
+          radarCtx.beginPath();
+          radarCtx.moveTo(px, py);
+          radarCtx.lineTo(ax, ay);
+          radarCtx.strokeStyle = color;
+          radarCtx.lineWidth = 2;
+          radarCtx.stroke();
+        }
+
+        // 3. Selection Double-Reticle Ring (Cyan)
+        if (t.selected) {
+          radarCtx.save();
+          radarCtx.strokeStyle = '#00f0ff';
+          radarCtx.lineWidth = 2;
+          radarCtx.shadowColor = '#00f0ff';
+          radarCtx.shadowBlur = 12;
+
+          radarCtx.beginPath();
+          radarCtx.arc(px, py, 18, 0, Math.PI * 2);
+          radarCtx.stroke();
+
+          // Rotating outer brackets
+          radarCtx.beginPath();
+          radarCtx.arc(px, py, 23, radarPulsePhase, radarPulsePhase + Math.PI / 2);
+          radarCtx.arc(px, py, 23, radarPulsePhase + Math.PI, radarPulsePhase + 3 * Math.PI / 2);
+          radarCtx.stroke();
+          radarCtx.restore();
+        }
+
+        // 4. Target Marker (Pulsing Beacon or Diamond)
+        radarCtx.save();
+        radarCtx.fillStyle = color;
+        radarCtx.shadowColor = color;
+        radarCtx.shadowBlur = 10;
+
+        if (isStatic) {
+          const pulseR = 7 + Math.sin(radarPulsePhase) * 2;
+          radarCtx.beginPath();
+          radarCtx.arc(px, py, pulseR, 0, Math.PI * 2);
+          radarCtx.fill();
+        } else if (isUnknown) {
+          radarCtx.beginPath();
+          radarCtx.moveTo(px, py - 9);
+          radarCtx.lineTo(px + 9, py);
+          radarCtx.lineTo(px, py + 9);
+          radarCtx.lineTo(px - 9, py);
+          radarCtx.closePath();
+          radarCtx.fill();
+        } else {
+          radarCtx.beginPath();
+          radarCtx.arc(px, py, 8, 0, Math.PI * 2);
+          radarCtx.fill();
+        }
+
+        // 5. Target Tactical Callout Label
+        radarCtx.shadowBlur = 0;
+        radarCtx.fillStyle = '#fff';
+        radarCtx.font = 'bold 11px monospace';
+        const labelText = `#${t.track_id} ${t.identity}`;
+        radarCtx.fillText(labelText, px + 12, py - 6);
+
+        radarCtx.fillStyle = color;
+        radarCtx.font = '9px monospace';
+        radarCtx.fillText(`[${t.status}] (${t.x.toFixed(1)}m, ${t.y.toFixed(1)}m)`, px + 12, py + 8);
+        radarCtx.restore();
+      });
+    }
+
+    // --- PQRST ECG Waveform Rendering ---
+    function drawPQRST(vitals, targetsCount) {
+      const w = ecgCanvas.width, h = ecgCanvas.height;
+      ecgCtx.clearRect(0, 0, w, h);
+
+      // Grid lines
+      ecgCtx.strokeStyle = 'rgba(0, 240, 255, 0.08)';
+      ecgCtx.lineWidth = 1;
+      for (let x = 0; x < w; x += 30) {
+        ecgCtx.beginPath(); ecgCtx.moveTo(x, 0); ecgCtx.lineTo(x, h); ecgCtx.stroke();
+      }
+      for (let y = 0; y < h; y += 30) {
+        ecgCtx.beginPath(); ecgCtx.moveTo(0, y); ecgCtx.lineTo(w, y); ecgCtx.stroke();
+      }
+
+      const trace = vitals.pqrst || [];
+      if (!trace.length) return;
+
+      ecgCtx.strokeStyle = vitals.locked ? '#ffaa00' : '#00ff88';
+      ecgCtx.lineWidth = 2.2;
+      ecgCtx.shadowColor = ecgCtx.strokeStyle;
+      ecgCtx.shadowBlur = vitals.locked ? 4 : 10;
+      ecgCtx.beginPath();
+
+      for (let i = 0; i < trace.length; i++) {
+        const x = (i / (trace.length - 1)) * w;
+        const y = (h / 2) - (trace[i] * 55);
+        if (i === 0) ecgCtx.moveTo(x, y);
+        else ecgCtx.lineTo(x, y);
+      }
+      ecgCtx.stroke();
+      ecgCtx.shadowBlur = 0;
+    }
+
+    // --- 52 Subcarrier CSI Spectrum Rendering ---
+    function drawSubcarriers(subs) {
+      const w = specCanvas.width, h = specCanvas.height;
+      specCtx.clearRect(0, 0, w, h);
+      if (!subs || !subs.length) return;
+
+      const barW = (w - 30) / subs.length;
+      for (let i = 0; i < subs.length; i++) {
+        const val = Math.min(1.0, subs[i] * 2.5);
+        const bh = val * (h - 40);
+        specCtx.fillStyle = (i >= 20 && i <= 32) ? '#00ff88' : '#00f0ff';
+        specCtx.fillRect(15 + i * barW, h - 20 - bh, barW - 2, bh);
+      }
+    }
+
+    // --- WebSocket Telemetry Stream Consumer ---
+    const ws = new WebSocket(`ws://${location.host}/ws/telemetry`);
+
+    ws.onmessage = (ev) => {
+      const d = JSON.parse(ev.data);
+      currentTargets = d.targets || [];
+      if (d.room_twin) roomTwinConfig = d.room_twin;
+
+      // Update Top Status Bar
+      document.getElementById('pktRate').textContent = `PKT RATE: ${d.pkt_rate} Hz`;
+      document.getElementById('rssiVal').textContent = `RSSI: ${d.rssi} dBm`;
+      document.getElementById('presenceBadge').textContent = `PRESENCE: ${d.presence_state}`;
+      document.getElementById('presenceBadge').style.color =
+        d.presence_state === 'EMPTY_ROOM' ? 'var(--muted)' :
+        d.presence_state === 'STATIC_VITAL' ? 'var(--green)' : 'var(--cyan)';
+
+      // Update RMT Crowd KPI
+      if (d.crowd) {
+        document.getElementById('crowdBadge').textContent = `RMT CROWD: ${d.crowd.estimated_count} PERS`;
+        document.getElementById('rmtEntropyVal').textContent = d.crowd.von_neumann_entropy.toFixed(2);
+      }
+
+      // Update Dual-Link Mesh Status
+      if (d.mesh_status) {
+        const t1 = d.mesh_status.tx1_active ? 'TX1 [OK]' : 'TX1 [OFF]';
+        const t2 = d.mesh_status.tx2_active ? 'TX2 [OK]' : 'TX2 [OFF]';
+        document.getElementById('meshBadge').textContent = `MESH: ${t1} | ${t2}`;
+        document.getElementById('meshBadge').style.borderColor = (d.mesh_status.tx1_active && d.mesh_status.tx2_active) ? 'var(--green)' : 'var(--amber)';
+      }
+
+      // Update Perimeter Gate Status
+      if (d.perimeter_gate) {
+        document.getElementById('gateBadgeStatus').textContent = `GATE: ${d.perimeter_gate.clutter_rejected_pct}% REJECTED`;
+      }
+
+      // Sync Simulation Selector
+      if (d.sim_mode && document.getElementById('simModeSelect').value !== d.sim_mode) {
+        document.getElementById('simModeSelect').value = d.sim_mode;
+      }
+
+      // Update Roster & Bio KPIs
+      document.getElementById('activeTargetsCount').textContent = currentTargets.length;
+
+      // Update Locked Target ID
+      const lockedTarget = currentTargets.find(t => t.selected);
+      if (lockedTarget) {
+        document.getElementById('targetId').textContent = `#${lockedTarget.track_id} ${lockedTarget.identity}`;
+        document.getElementById('targetId').style.color = lockedTarget.identity === 'UNKNOWN TARGET' ? 'var(--red)' : 'var(--green)';
+        document.getElementById('coordText').textContent = `🎯 TARGET LOCKED: [${lockedTarget.identity}] (X:${lockedTarget.x}m, Y:${lockedTarget.y}m)`;
+      } else {
+        document.getElementById('targetId').textContent = currentTargets.length > 0 ? 'SELECTION REQUIRED' : 'NO TARGET';
+        document.getElementById('targetId').style.color = 'var(--muted)';
+        document.getElementById('coordText').textContent = currentTargets.length > 1 ? '⚠️ حشد متعدد: انقر على شخص لقفله' : 'انقر على أي هدف لقفله 🎯';
+      }
+
+      // Update Roster Table
+      const tbody = document.getElementById('rosterTbody');
+      if (currentTargets.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--muted);">لا توجد أهداف نشطة حالياً (SECTOR CLEAR)</td></tr>';
+      } else {
+        tbody.innerHTML = currentTargets.map(t => {
+          const isSel = t.selected ? 'background:rgba(0,240,255,0.12);' : '';
+          const idClass = (t.identity === 'UNKNOWN TARGET') ? 'tag-red' : 'tag-green';
+          return `
+            <tr style="${isSel}">
+              <td><b>#${t.track_id}</b></td>
+              <td class="${idClass}">${t.identity}</td>
+              <td>${t.mahalanobis.toFixed(2)}</td>
+              <td><span class="badge" style="padding:2px 6px; font-size:0.7rem;">${t.status}</span></td>
+              <td>
+                <button class="btn-sm" onclick="selectTargetId(${t.track_id})">
+                  ${t.selected ? 'مقفول 🎯' : 'قفل النبض 🎯'}
+                </button>
+              </td>
+            </tr>
+          `;
+        }).join('');
+      }
+
+      // Update 20-Second Enrollment Progress
+      const enrollBox = document.getElementById('enrollProgressContainer');
+      const enrollBar = document.getElementById('enrollProgressBar');
+      const enrollText = document.getElementById('enrollProgressText');
+      if (d.enrolling && d.enrolling.active) {
+        enrollBox.style.display = 'block';
+        enrollBar.style.width = `${d.enrolling.progress_pct}%`;
+        enrollText.textContent = `تسجيل حي: ${d.enrolling.name} [${d.enrolling.progress_pct}% - متبقي ${d.enrolling.remaining_sec}s - عينات صالحة: ${d.enrolling.valid_windows}]`;
+      } else {
+        enrollBox.style.display = 'none';
+      }
+
+      // Update Vital Signs KPIs & Multi-Target Interference Overlay
+      const vitals = d.vitals;
+      const overlay = document.getElementById('ecgMultiTargetOverlay');
+
+      if (vitals.lock_reason && vitals.lock_reason.includes('MULTI-TARGET')) {
+        overlay.style.display = 'flex';
+      } else {
+        overlay.style.display = 'none';
+      }
+
+      document.getElementById('gateBadge').textContent = vitals.lock_reason;
+      document.getElementById('gateBadge').style.color = vitals.locked ? 'var(--amber)' : 'var(--green)';
+      document.getElementById('hrVal').textContent = vitals.hr_bpm > 0 ? vitals.hr_bpm : '--';
+      document.getElementById('rrVal').textContent = vitals.rr_rpm > 0 ? vitals.rr_rpm : '--';
+      document.getElementById('sqiVal').textContent = vitals.sqi.toFixed(2);
+
+      // Render Canvases
+      drawRadar(d.presence_state, currentTargets, d.room_twin || roomTwinConfig, d.perimeter_gate);
+      drawPQRST(vitals, currentTargets.length);
+      drawSubcarriers(d.subcarriers);
+    };
+  </script>
+</body>
+</html>

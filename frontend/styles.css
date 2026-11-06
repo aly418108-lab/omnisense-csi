@@ -1,0 +1,185 @@
+/* OmniSense CSI - Tactical Cyber-Radar Theme */
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;800&family=Orbitron:wght@500;700;900&display=swap');
+
+:root {
+  --color-bg: #0a0f1d;
+  --color-panel: #0e162a;
+  --color-cyan: #00f3ff;
+  --color-emerald: #00ff88;
+  --color-crimson: #ff0055;
+  --color-amber: #f59e0b;
+}
+
+body {
+  font-family: 'JetBrains Mono', monospace;
+  background-color: var(--color-bg);
+  background-image: 
+    radial-gradient(circle at 50% 0%, rgba(0, 243, 255, 0.08) 0%, transparent 60%),
+    radial-gradient(circle at 100% 100%, rgba(0, 255, 136, 0.04) 0%, transparent 50%),
+    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 32px 32px, 32px 32px;
+  overflow-x: hidden;
+}
+
+h1, .font-orbitron {
+  font-family: 'Orbitron', sans-serif;
+}
+
+/* Tactical Glass Card */
+.tactical-card {
+  background: linear-gradient(135deg, rgba(14, 22, 42, 0.85) 0%, rgba(10, 15, 29, 0.95) 100%);
+  border: 1px solid rgba(0, 243, 255, 0.15);
+  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  position: relative;
+}
+
+.tactical-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 8px;
+  height: 8px;
+  border-top: 2px solid var(--color-cyan);
+  border-left: 2px solid var(--color-cyan);
+  pointer-events: none;
+}
+
+.tactical-card::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 8px;
+  height: 8px;
+  border-bottom: 2px solid var(--color-cyan);
+  border-right: 2px solid var(--color-cyan);
+  pointer-events: none;
+}
+
+/* Radar Scan Line Animation */
+.radar-scan-line {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 50%;
+  height: 50%;
+  transform-origin: 0% 100%;
+  background: linear-gradient(45deg, rgba(0, 243, 255, 0.4) 0%, transparent 60%);
+  border-radius: 100% 0 0 0;
+  animation: radar-sweep 4s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes radar-sweep {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes spin-reverse {
+  from { transform: rotate(360deg); }
+  to { transform: rotate(0deg); }
+}
+
+.animate-spin-reverse {
+  animation: spin-reverse 12s linear infinite;
+}
+
+.animate-spin-slow {
+  animation: radar-sweep 8s linear infinite;
+}
+
+/* Neon Glow States for Target Reticle */
+.glow-emerald {
+  border-color: rgba(0, 255, 136, 0.8) !important;
+  box-shadow: 0 0 35px rgba(0, 255, 136, 0.4), inset 0 0 20px rgba(0, 255, 136, 0.2) !important;
+}
+
+.glow-crimson {
+  border-color: rgba(255, 0, 85, 0.9) !important;
+  box-shadow: 0 0 40px rgba(255, 0, 85, 0.6), inset 0 0 25px rgba(255, 0, 85, 0.3) !important;
+  animation: alert-pulse 1s ease-in-out infinite alternate;
+}
+
+.glow-cyan {
+  border-color: rgba(0, 243, 255, 0.7) !important;
+  box-shadow: 0 0 30px rgba(0, 243, 255, 0.35), inset 0 0 15px rgba(0, 243, 255, 0.2) !important;
+}
+
+@keyframes alert-pulse {
+  from {
+    box-shadow: 0 0 25px rgba(255, 0, 85, 0.4), inset 0 0 15px rgba(255, 0, 85, 0.2);
+  }
+  to {
+    box-shadow: 0 0 50px rgba(255, 0, 85, 0.8), inset 0 0 30px rgba(255, 0, 85, 0.5);
+  }
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0f1d;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #00f3ff;
+}
+
+/* Active Sim Button highlight */
+.sim-btn-active {
+  border-color: var(--color-cyan) !important;
+  background-color: rgba(0, 243, 255, 0.15) !important;
+  box-shadow: 0 0 12px rgba(0, 243, 255, 0.25) !important;
+}
+
+/* Medical ECG Grid Pattern */
+.medical-ecg-canvas {
+  background-color: #030712;
+  background-image: 
+    linear-gradient(rgba(0, 255, 136, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 255, 136, 0.08) 1px, transparent 1px),
+    linear-gradient(rgba(0, 255, 136, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 255, 136, 0.03) 1px, transparent 1px);
+  background-size: 20px 20px, 20px 20px, 4px 4px, 4px 4px;
+}
+
+/* Tactical Map Canvas */
+#tactical-map-canvas {
+  cursor: crosshair;
+}
+
+/* Profile Delete Button Hover */
+.profile-del-btn {
+  opacity: 0.6;
+  transition: all 0.2s ease;
+}
+.profile-del-btn:hover {
+  opacity: 1;
+  color: #ff0055 !important;
+  transform: scale(1.15);
+}
+
+/* Sniper Target Lock-on Animations */
+@keyframes lock-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes lock-pulse {
+  0% { transform: scale(1); opacity: 0.8; }
+  50% { transform: scale(1.12); opacity: 1; }
+  100% { transform: scale(1); opacity: 0.8; }
+}
+
+.lock-reticle-active {
+  animation: lock-spin 6s linear infinite, lock-pulse 2s ease-in-out infinite;
+}
+
+

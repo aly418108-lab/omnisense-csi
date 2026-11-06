@@ -1,0 +1,35 @@
+# OmniSense CSI v4.0 (IEEE Research Edition) Tactical Architecture & Rules
+
+- **UART Baud Rate:** Strictly 921600 baud.
+- **Serialization:** Strictly 122-byte packed binary frame (`0x55AA` magic, 52 L-LTF subcarriers, CRC-16-CCITT, no ASCII/CSV in CSI path) with `source_mac` (bytes 6..11) extraction and forwarding for Dual-Link Bistatic stream demultiplexing.
+- **Hardware Provisioning & Multi-Node Bistatic Mesh:**
+  - Primary Injector (`ESP32-TX1`): UDP packet injection on port 3333 at 100 Hz.
+  - Secondary Injector (`ESP32-TX2`): UDP packet injection on port 3334 at staggered 75 Hz (in `firmware/esp32_tx_injector_secondary/`).
+  - Radar Receiver (`ESP32-RX`): CSI extractor streaming binary frames @ 921600 baud to Linux host.
+  - Mesh Demultiplexing: Dedicated ring buffers `stream_tx1`, `stream_tx2`, and `stream_ap` for true spatial diversity.
+- **Subcarriers & Normalization:** 52 active L-LTF subcarriers (indices [-26..-1] and [+1..+26]), L2 AGC Normalization, Hadamard channel calibration, and adjacent subcarrier CSI-Ratio ($R_k(t) = H_k(t) / H_{k+1}(t)$, 50 ratio channels).
+- **3-Tier True Presence & Motion Gating:**
+  - `EMPTY_ROOM`: $E_{\text{motion}} < 2.2 \times E_{\text{noise\_floor}}$ AND $E_{\text{macro\_doppler}} < 0.001$ AND $\text{SNR}_{\text{vital}} < 4.5\text{ dB}$ for $> 2.5\text{ s}$ -> 0 radar targets ("SECTOR CLEAR").
+  - `STATIC_VITAL`: No macro motion, but $\text{SNR}_{\text{vital}} \ge 4.5\text{ dB}$ (respiration [0.15, 0.60] Hz or cardiac [0.95, 2.10] Hz) -> 1 stationary target at (0.0, 4.0) with status `STATIC_VITAL` (Green Beacon).
+  - `ACTIVE_MOTION` / `ACTIVE_MULTI`: Macro-Doppler detected -> RMT-MDL unbounded tracking.
+- **Subsystem B: Unbounded RMT-MDL Crowd Counting (0 to 10+ Targets):**
+  - Completely eliminates FastICA person-splitting.
+  - Spatial-temporal covariance matrix $\mathbf{R}_{HH} = \frac{1}{W} \mathbf{H}^H \mathbf{H}$ over sliding window $W = 100$.
+  - Wax-Kailath Minimum Description Length (MDL) order selection + Marchenko-Pastur RMT noise floor.
+  - Strict Rank-1 Coherent Target Guarantee: If $\lambda_1 / \sum_{k=2}^{52} \lambda_k > 1.45$, force `estimated_count = 1` and render exactly 1 target.
+- **Subsystem C: Through-Wall & Perimeter Range Gating:**
+  - Windowed IFFT Channel Impulse Response (CIR) delay profiling across 52 subcarriers.
+  - Suppresses excess multipath delay reflections beyond `max_sensing_radius_m` (default 4.0m) or through-wall attenuation $> 12.0\text{ dB}$, updating `clutter_rejected_pct`.
+- **Subsystem D: Panorama-Guided RF Digital Twin & Specular Multipath Ghost Folding:**
+  - 2D room geometry ($W \times L$) and node placement (TX1, TX2, RX, AP).
+  - 1st-order specular wall reflection ray-tracing folds virtual mirror coordinates ($2W_{\text{half}} - x$, $2L - y$) back inside the room polygon, suppressing ghost targets.
+- **Subsystem E: IEEE Research & Benchmark Suite:**
+  - Tracks confusion matrix, localization RMSE, vital signs MAE, and clutter specificity.
+  - Automated publication-ready IEEEtran LaTeX table generation (`\begin{table}...\end{table}`).
+- **20-Second Gait Biometric Enrollment & Open-Set Classification:**
+  - `ENROLL_DURATION_SEC = 20.0` with active-motion frame filtering.
+  - 2-Centroid K-Means / GMM with 24-dimensional micro-Doppler feature vectors.
+  - Ledoit-Wolf regularized covariance shrinkage + $\chi^2_{24}$ Open-Set gate.
+- **Interactive Click-to-Lock BCG/PQRST Vital Signs:**
+  - Automatic safety lock when multiple targets are present without selection.
+  - Spatial subcarrier projection + SVD + VMD ($K=4, \alpha=2000$) + Coiflet-4 DWT (`coif4`) PQRST reconstruction.

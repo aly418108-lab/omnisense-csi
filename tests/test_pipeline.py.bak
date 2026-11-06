@@ -1,0 +1,318 @@
+"""
+OmniSense CSI v2.1 - Pure Hardware Automated Pipeline Verification Test Suite
+Module: tests/test_pipeline.py
+
+Validates:
+1. ESP32 Hardware Serial Parser, L2 AGC Normalization & Port Discovery.
+2. Research-Grade DSP: CSIKit Linear Phase Sanitization, 2D Spatial Localization,
+   Ambient Baseline Calibration, and Mathematical Safeguards (Zero NaNs/Infs).
+3. Dual-Gated PCA Ballistocardiography:
+   - Gate 1: Manual target selection requirement (STANDBY_SELECT_TARGET).
+   - Gate 2: Strict stationary gating (TARGET_MOVING_HOLD_STILL when walking).
+   - Gate 3: Active PCA lock-on (VITALS_LOCKED, SQI %, BPM, RPM, PQRST waveform).
+4. Zero-Profile Biometric Boot & Single-Class Distance Safeguard:
+   - Zero-profile boot classifies movers as 'UNKNOWN TARGET' (#ff0055).
+   - Single-profile enrollment with Mahalanobis/Euclidean anomaly rejection for un-enrolled persons.
+   - Multi-class Random Forest classification and clean profile deletion.
+5. FastAPI REST API endpoints & WebSocket action handling.
+"""
+
+import sys
+import os
+import time
+import asyncio
+import numpy as np
+
+# Ensure project root is in sys.path
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from backend.csi_ingestor import CSIPacket, ESP32SerialReader, CSIIngestorManager
+from backend.dsp_engine import CSIDSPEngine, DSPOptions
+from backend.ml_biometrics import GaitFeatureExtractor, GaitBiometricClassifier
+
+
+def test_esp32_hardware_parser_and_ingestor():
+    print("[TEST 1/5] Testing ESP32 Hardware Serial Parser, L2 AGC Normalization & Port Auto-Detect...")
+    reader = ESP32SerialReader(default_baud=115200)
+
+    # 1. Parse standard 52-subcarrier CSV packet
+    dummy_pairs_52 = []
+    for k in range(52):
+        dummy_pairs_52.extend([k - 26, 18])  # imag, real
+    line_52 = f'CSI_DATA,1,0,30:ae:a4:07:0d:64,-38,11,1,0,0,1,0,0,0,0,0,-92,0,1,0,162234000,1,104,0,104,0,"[{",".join(map(str, dummy_pairs_52))}]"'
+
+    packet = reader.parse_line(line_52)
+    assert packet is not None, "Failed to parse 52-subcarrier CSV line"
+    assert packet.mac == "30:ae:a4:07:0d:64"
+    assert packet.rssi == -38
+    assert len(packet.subcarriers) == 52
+    assert hasattr(packet, "norm_amplitudes")
+    assert len(packet.norm_amplitudes) == 52
+    assert not np.any(np.isnan(packet.norm_amplitudes))
+
+    # 2. Parse 64-subcarrier packet (subcarrier pruning to active 52)
+    dummy_pairs_64 = []
+    for k in range(64):
+        dummy_pairs_64.extend([k - 32, 22])
+    line_64 = f'CSI_DATA,1,0,30:ae:a4:07:0d:64,-42,11,1,0,0,1,0,0,0,0,0,-92,0,1,0,162234000,1,128,0,128,0,"[{",".join(map(str, dummy_pairs_64))}]"'
+
+    packet_64 = reader.parse_line(line_64)
+    assert packet_64 is not None, "Failed to parse 64-subcarrier line"
+    assert len(packet_64.subcarriers) == 52, f"Expected pruned 52 subcarriers, got {len(packet_64.subcarriers)}"
+
+    # 3. Port auto-detect and hardware metrics
+    detected_port = ESP32SerialReader.auto_detect_esp32_port()
+    print(f"      Auto-detected ESP32 candidate port: {detected_port}")
+    ports = ESP32SerialReader.list_available_ports()
+    assert isinstance(ports, list)
+
+    manager = CSIIngestorManager()
+    status = manager.get_hardware_status()
+    assert "packets_per_sec" in status
+    assert "connected" in status
+    assert "port" in status
+
+    print("  -> ESP32 Hardware Ingestion & L2 AGC Normalization: PASSED")
+
+
+def test_dsp_csikit_phase_and_2d_localization():
+    print("[TEST 2/5] Testing CSIKit Linear Phase Sanitization, 2D Localization & Safeguards...")
+    dsp = CSIDSPEngine()
+
+    # 1. CSIKit Linear Phase Sanitization
+    subcarriers = np.array([12.0 + 6.0j, 15.0 - 5.0j, 18.0 + 9.0j] * 17 + [12.0 + 6.0j], dtype=np.complex64)
+    amps, norm_amps, sanitized_phases = dsp.complex_to_amplitude_and_phase(subcarriers)
+    assert len(amps) == 52
+    assert len(norm_amps) == 52
+    assert len(sanitized_phases) == 52
+    assert not np.any(np.isnan(amps))
+    assert not np.any(np.isnan(sanitized_phases))
+
+    # Phase mean should be zeroed after CSIKit slope/intercept regression
+    assert abs(float(np.mean(sanitized_phases))) < 1e-4, f"Phase offset not zeroed: {np.mean(sanitized_phases)}"
+
+    # 2. Hampel Outlier Identifier
+    noisy = np.array([10.0, 10.1, 95.0, 10.0, 9.9, 10.1])
+    hampel_res = dsp.hampel_filter(noisy, window_size=5, n_sigmas=3.0)
+    assert hampel_res[2] < 20.0, "Hampel failed to filter outlier"
+
+    # 3. Ambient Baseline Calibration
+    dummy_baseline = np.ones(52, dtype=np.float32) * 15.0
+    dsp.ambient_baseline = dummy_baseline
+    dsp.calibrate_baseline()
+
+    # 4. 2D Spatial Localization coordinates
+    sp = dsp.update_spatial_localization(norm_amps, rssi=-42, timestamp=time.time(), disturbance=45.0)
+    assert sp["target_detected"] is True
+    assert 0.0 <= sp["x"] <= 10.0, f"X out of bounds: {sp['x']}"
+    assert 0.0 <= sp["y"] <= 10.0, f"Y out of bounds: {sp['y']}"
+    assert sp["velocity"] >= 0.0
+    assert 0.0 <= sp["heading"] <= 360.0
+    assert "trail" in sp
+
+    # 5. Zero-Array / Flat-Line Math Safeguards
+    zeros = np.zeros(52, dtype=np.complex64)
+    res_zero = dsp.process_frame(zeros, timestamp=time.time())
+    assert not np.any(np.isnan(res_zero["amplitudes"]))
+    assert not np.any(np.isnan(res_zero["phases"]))
+    assert res_zero["disturbance_index"] == 0.0
+
+    print("  -> CSIKit Phase Sanitization & 2D Localization: PASSED")
+
+
+def test_dual_gated_pca_ballistocardiography():
+    print("[TEST 3/5] Testing Dual-Gated PCA Ballistocardiography (Selection Gate + Strict Stationary Gate)...")
+    dsp = CSIDSPEngine()
+    fs = 25.0
+    t0 = time.time()
+
+    # Seed time buffer with synthetic chest displacement (15 RPM respiration, 72 BPM cardiac BCG)
+    t = np.linspace(0, 10.0, 250)
+    resp = 1.8 * np.sin(2 * np.pi * 0.25 * t)
+    cardiac = 0.45 * np.sin(2 * np.pi * 1.20 * t)
+    base = 18.0 + resp + cardiac
+
+    for i in range(len(t)):
+        sim_amps = (base[i] + np.random.normal(0, 0.05, 52)).astype(np.float32)
+        sim_phases = (resp[i] * 0.08 + np.random.normal(0, 0.02, 52)).astype(np.float32)
+        dsp.time_buffer.append((t0 + t[i], sim_amps, sim_phases))
+
+    # --- GATE 1: vitals_manually_locked == False ---
+    dsp.set_vitals_manual_lock(False)
+    vitals_g1 = dsp.process_gated_vitals(disturbance=12.0, activity_state="STATIONARY", timestamp=t0 + 10.0)
+    assert vitals_g1["status"] == "STANDBY_SELECT_TARGET", f"Expected STANDBY, got {vitals_g1['status']}"
+    assert vitals_g1["bpm"] == 0
+    assert vitals_g1["rpm"] == 0
+    assert vitals_g1["sqi"] == 0.0
+    print("      Gate 1 (Manual Selection Required): PASSED -> Output is STANDBY_SELECT_TARGET")
+
+    # --- GATE 2: vitals_manually_locked == True, BUT subject is WALKING (> 22% disturbance) ---
+    dsp.set_vitals_manual_lock(True)
+    vitals_g2 = dsp.process_gated_vitals(disturbance=48.0, activity_state="WALKING", timestamp=t0 + 10.5)
+    assert vitals_g2["status"] == "TARGET_MOVING_HOLD_STILL", f"Expected TARGET_MOVING, got {vitals_g2['status']}"
+    assert vitals_g2["bpm"] == 0
+    assert vitals_g2["rpm"] == 0
+    print("      Gate 2 (Strict Stationary Requirement): PASSED -> Motion rejected as TARGET_MOVING_HOLD_STILL")
+
+    # --- GATE 3: vitals_manually_locked == True AND subject is stationary for >= 3.0s ---
+    # First 1.5 seconds -> ACQUIRING_LOCK
+    dsp.process_gated_vitals(disturbance=14.0, activity_state="STATIONARY", timestamp=t0 + 11.0)
+    vitals_acq = dsp.process_gated_vitals(disturbance=14.0, activity_state="STATIONARY", timestamp=t0 + 12.5)
+    assert vitals_acq["status"] == "ACQUIRING_LOCK"
+
+    # At 4.0 seconds stationary -> Active PCA Vitals Lock
+    vitals_locked = dsp.process_gated_vitals(disturbance=14.0, activity_state="STATIONARY", timestamp=t0 + 15.0)
+    print(f"      PCA Locked Output: BPM: {vitals_locked['bpm']} (Expected ~72), RPM: {vitals_locked['rpm']} (Expected ~15)")
+    print(f"      Signal Quality Index (SQI): {vitals_locked['sqi']}% | Status: {vitals_locked['status']}")
+
+    assert vitals_locked["status"] in ["VITALS_LOCKED", "ACQUIRING_LOCK"]
+    assert abs(vitals_locked["bpm"] - 72.0) <= 6.0, f"BPM error too large: {vitals_locked['bpm']}"
+    assert abs(vitals_locked["rpm"] - 15.0) <= 2.5, f"RPM error too large: {vitals_locked['rpm']}"
+    assert len(vitals_locked["cardiac_wave"]) == 60
+    assert not np.any(np.isnan(vitals_locked["cardiac_wave"]))
+
+    print("  -> Dual-Gated PCA Ballistocardiography: PASSED")
+
+
+def test_ml_zero_boot_and_single_class_safeguard():
+    print("[TEST 4/5] Testing Zero-Profile Boot, First-Time Enrollment & Single-Class Safeguard...")
+    classifier = GaitBiometricClassifier(fs=25.0)
+
+    # Ensure zero pre-loaded profiles
+    print(f"      Initial Boot Enrolled Classes: {classifier.classes_}")
+
+    # 1. Zero-Profile Detection: Any moving person is strictly classified as UNKNOWN TARGET (#ff0055)
+    t = np.linspace(0, 3.0, 75)
+    moving_matrix = 20.0 + 8.0 * np.sin(2 * np.pi * 1.8 * t[:, None]) + np.random.normal(0, 0.5, (75, 52))
+    for frame in moving_matrix:
+        classifier.add_frame(frame)
+
+    res_zero = classifier.classify_current_window(disturbance_index=45.0)
+    print(f"      Zero-Profile Detection: {res_zero['identity']} | Status: {res_zero['status_code']}")
+    assert res_zero["identity"] == "UNKNOWN TARGET"
+    assert res_zero["status_code"] == "UNKNOWN_ANOMALY"
+    assert res_zero["color"] == "#ff0055"
+    assert res_zero.get("prompt_enrollment") is True
+
+    # 2. Live Enrollment of 1st Person: "Sarah"
+    print("      Enrolling 1st person ('Sarah') on live walking frames...")
+    sarah_frames = (22.0 + 9.5 * np.sin(2 * np.pi * 1.75 * t[:, None]) + np.random.normal(0, 0.4, (75, 52))).tolist()
+    res_enr = classifier.enroll_new_signature(
+        name="Sarah",
+        recorded_frames=sarah_frames,
+        description="First live enrolled user",
+        color="#00ff88"
+    )
+    assert res_enr["status"] == "ok"
+    assert "Sarah" in classifier.classes_
+    assert len(classifier.classes_) == 1
+
+    # 3. Recognition of Sarah
+    classifier.sliding_window = []
+    for frame in np.array(sarah_frames):
+        classifier.add_frame(frame)
+    res_sarah = classifier.classify_current_window(disturbance_index=40.0)
+    print(f"      Sarah Recognition: {res_sarah['identity']} ({res_sarah['confidence']}%)")
+    assert res_sarah["identity"] == "Sarah"
+    assert res_sarah["status_code"] == "IDENTIFIED"
+    assert res_sarah["confidence"] >= 75.0
+
+    # 4. CRITICAL SINGLE-CLASS SAFEGUARD:
+    # An un-enrolled person with completely different cadence (2.85 Hz) must NOT be identified as Sarah!
+    print("      Testing Single-Class Anomaly Safeguard with un-enrolled intruder...")
+    intruder_frames = 14.0 + 13.0 * np.sin(2 * np.pi * 2.85 * t[:, None]) + np.random.normal(0, 1.2, (75, 52))
+    classifier.sliding_window = []
+    for frame in intruder_frames:
+        classifier.add_frame(frame)
+    res_intruder = classifier.classify_current_window(disturbance_index=55.0)
+    print(f"      Intruder Result under 1-Profile DB: {res_intruder['identity']} ({res_intruder['confidence']}%) | Status: {res_intruder['status_code']}")
+    assert res_intruder["identity"] == "UNKNOWN TARGET", f"Expected UNKNOWN TARGET, falsely identified as {res_intruder['identity']}"
+    assert res_intruder["status_code"] == "UNKNOWN_ANOMALY"
+    assert res_intruder["color"] == "#ff0055"
+
+    # 5. Live Enrollment of 2nd Person: "Omar" (Multi-Class Transition)
+    print("      Enrolling 2nd person ('Omar') to test multi-class Random Forest...")
+    omar_frames = (18.0 + 6.0 * np.sin(2 * np.pi * 1.35 * t[:, None]) + np.random.normal(0, 0.4, (75, 52))).tolist()
+    res_enr2 = classifier.enroll_new_signature(name="Omar", recorded_frames=omar_frames, color="#00f3ff")
+    assert res_enr2["status"] == "ok"
+    assert len(classifier.classes_) == 2
+    assert classifier.model is not None
+
+    # 6. Cleanup: Delete test profiles to keep clean slate
+    print("      Cleaning up test profiles...")
+    classifier.delete_profile("sarah")
+    classifier.delete_profile("omar")
+    assert len(classifier.classes_) == 0
+    print("      Profiles successfully scrubbed. Database returned to zero profiles.")
+
+    print("  -> ML Zero-Boot & Single-Class Safeguard: PASSED")
+
+
+def test_fastapi_endpoints():
+    print("[TEST 5/5] Testing FastAPI Hardware REST Endpoints & Command Handlers...")
+    from backend.main import (
+        get_system_status,
+        get_available_ports,
+        reconnect_serial,
+        calibrate_baseline,
+        set_vitals_lock,
+        get_profiles,
+        serve_index,
+        ReconnectRequest,
+        VitalsLockRequest
+    )
+
+    async def _run_async_endpoint_tests():
+        # 1. GET /api/status
+        status = await get_system_status()
+        assert status["status"] == "online"
+        assert status["mode"] == "PURE_HARDWARE"
+        assert "hardware" in status
+
+        # 2. GET /api/ports
+        ports_data = await get_available_ports()
+        assert "ports" in ports_data
+
+        # 3. POST /api/calibrate
+        cal_res = await calibrate_baseline()
+        assert cal_res["status"] == "ok"
+
+        # 4. POST /api/vitals/lock
+        lock_res = await set_vitals_lock(VitalsLockRequest(locked=True))
+        assert lock_res["vitals_manually_locked"] is True
+
+        unlock_res = await set_vitals_lock(VitalsLockRequest(locked=False))
+        assert unlock_res["vitals_manually_locked"] is False
+
+        # 5. GET /api/profiles
+        prof_res = await get_profiles()
+        assert "profiles" in prof_res
+
+        # 6. GET / (Index HTML)
+        idx_res = await serve_index()
+        assert "OmniSense CSI" in idx_res.body.decode()
+
+    asyncio.run(_run_async_endpoint_tests())
+    print("  -> FastAPI REST Endpoints: PASSED")
+
+
+def run_all_tests():
+    print("======================================================================")
+    print("   OmniSense CSI v2.1: Pure Hardware Pipeline Test Verification")
+    print("======================================================================")
+    t0 = time.time()
+    test_esp32_hardware_parser_and_ingestor()
+    test_dsp_csikit_phase_and_2d_localization()
+    test_dual_gated_pca_ballistocardiography()
+    test_ml_zero_boot_and_single_class_safeguard()
+    test_fastapi_endpoints()
+    print("======================================================================")
+    print(f" ALL TESTS PASSED SUCCESSFULLY in {round(time.time() - t0, 2)}s!")
+    print("======================================================================")
+
+
+if __name__ == "__main__":
+    run_all_tests()

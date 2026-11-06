@@ -1,0 +1,71 @@
+[1/5] cd /home/ali7fa/omnisense-csi/firmware/esp32_tx_injector_secondary/build/esp-idf/esptool_py && /home/ali7fa/.espressif/python_env/idf5.1_py3.12_env/bin/python /home/ali7fa/esp/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /home/ali7fa/omnisense-csi/firmware/esp32_tx_injector_secondary/build/partition_table/partition-table.bin /home/ali7fa/omnisense-csi/firmware/esp32_tx_injector_secondary/build/esp32_tx_injector_secondary.bin
+esp32_tx_injector_secondary.bin binary size 0xb9020 bytes. Smallest app partition is 0x100000 bytes. 0x46fe0 bytes (28%) free.
+[2/5] Performing build step for 'bootloader'
+[1/1] cd /home/ali7fa/omnisense-csi/firmware/esp32_tx_injector_secondary/build/bootloader/esp-idf/esptool_py && /home/ali7fa/.espressif/python_env/idf5.1_py3.12_env/bin/python /home/ali7fa/esp/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x1000 /home/ali7fa/omnisense-csi/firmware/esp32_tx_injector_secondary/build/bootloader/bootloader.bin
+Bootloader binary size 0x6800 bytes. 0x800 bytes (7%) free.
+[3/5] No install step for 'bootloader'
+[4/5] Completed 'bootloader'
+[4/5] cd /home/ali7fa/esp/esp-idf/components/esptool_py && /usr/bin/cmake -D IDF_PATH=/home/ali7fa/esp/esp-idf -D "SERIAL_TOOL=/home/ali7fa/.espressif/python_env/idf5.1_py3.12_env/bin/python;;/home/ali7fa/esp/esp-idf/components/esptool_py/esptool/esptool.py;--chip;esp32" -D "SERIAL_TOOL_ARGS=--before=default_reset;--after=hard_reset;write_flash;@flash_args" -D WORKING_DIRECTORY=/home/ali7fa/omnisense-csi/firmware/esp32_tx_injector_secondary/build -P /home/ali7fa/esp/esp-idf/components/esptool_py/run_serial_tool.cmake
+esptool.py --chip esp32 -p /dev/ttyACM0 -b 921600 --before=default_reset --after=hard_reset write_flash --flash_mode dio --flash_freq 40m --flash_size 2MB 0x1000 bootloader/bootloader.bin 0x10000 esp32_tx_injector_secondary.bin 0x8000 partition_table/partition-table.bin
+esptool.py v4.13.0
+Serial port /dev/ttyACM0
+Connecting.......
+Chip is ESP32-D0WDQ6 (revision v1.1)
+Features: WiFi, BT, Dual Core, 240MHz, VRef calibration in efuse, Coding Scheme None
+Crystal is 40MHz
+MAC: f8:b3:b7:74:a8:0c
+Uploading stub...
+Running stub...
+Stub running...
+Changing baud rate to 921600
+Changed.
+Configuring flash size...
+Flash will be erased from 0x00001000 to 0x00007fff...
+Flash will be erased from 0x00010000 to 0x000c9fff...
+Flash will be erased from 0x00008000 to 0x00008fff...
+SHA digest in image updated
+Compressed 26624 bytes to 16660...
+Writing at 0x00001000... (50 %)
+Writing at 0x000076a0... (100 %)
+Wrote 26624 bytes (16660 compressed) at 0x00001000 in 0.7 seconds (effective 304.1 kbit/s)...
+Hash of data verified.
+Compressed 757792 bytes to 490911...
+Writing at 0x00010000... (3 %)
+Writing at 0x0001c3d3... (6 %)
+Writing at 0x000247ab... (10 %)
+Writing at 0x00029cce... (13 %)
+Writing at 0x00031ddb... (16 %)
+Writing at 0x000373e3... (20 %)
+Writing at 0x0003cc3b... (23 %)
+Writing at 0x0004216f... (26 %)
+Writing at 0x00047891... (30 %)
+Writing at 0x0004d13f... (33 %)
+Writing at 0x00052a40... (36 %)
+Writing at 0x00058708... (40 %)
+Writing at 0x0005de06... (43 %)
+Writing at 0x000630dc... (46 %)
+Writing at 0x000685e9... (50 %)
+Writing at 0x0006d8d1... (53 %)
+Writing at 0x00072f71... (56 %)
+Writing at 0x000786f9... (60 %)
+Writing at 0x0007e2c2... (63 %)
+Writing at 0x00083903... (66 %)
+Writing at 0x00089313... (70 %)
+Writing at 0x0008ec6a... (73 %)
+Writing at 0x00094838... (76 %)
+Writing at 0x0009a142... (80 %)
+Writing at 0x000a29b8... (83 %)
+Writing at 0x000aacce... (86 %)
+Writing at 0x000b1639... (90 %)
+Writing at 0x000b8a14... (93 %)
+Writing at 0x000be409... (96 %)
+Writing at 0x000c3be0... (100 %)
+Wrote 757792 bytes (490911 compressed) at 0x00010000 in 7.3 seconds (effective 825.9 kbit/s)...
+Hash of data verified.
+Compressed 3072 bytes to 103...
+Writing at 0x00008000... (100 %)
+Wrote 3072 bytes (103 compressed) at 0x00008000 in 0.1 seconds (effective 339.2 kbit/s)...
+Hash of data verified.
+
+Leaving...
+Hard resetting via RTS pin...
