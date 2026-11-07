@@ -417,26 +417,67 @@
     let currentTargets = [];
     let radarPulsePhase = 0;
     let roomTwinConfig = {
+      room_width: 6.0,
+      room_length: 8.0,
       width_m: 6.0,
       length_m: 8.0,
+      room_width_m: 6.0,
+      room_length_m: 8.0,
       wall_material: "CONCRETE",
+      nodes: {
+        tx1: { x: -2.0, y: 0.0, label: "TX1 (100Hz)" },
+        tx2: { x: 2.0, y: 0.0, label: "TX2 (75Hz)" },
+        rx:  { x: 0.0, y: 0.0, label: "ESP32-RX" },
+        ap:  { x: 0.0, y: 6.0, label: "SAM 4G AP" }
+      },
       tx1_pos: [-2.0, 0.0],
       tx2_pos: [2.0, 0.0],
       rx_pos: [0.0, 0.0],
       ap_pos: [0.0, 6.0]
     };
 
+    // --- Dynamic World-to-Canvas 1:1 Metric Coordinate Projection ---
+    function getRadarGeometry() {
+      const w = radarCanvas.width;
+      const h = radarCanvas.height;
+      const rw = Number((roomTwinConfig && (roomTwinConfig.room_width_m || roomTwinConfig.width_m || roomTwinConfig.room_width)) || 6.0);
+      const rl = Number((roomTwinConfig && (roomTwinConfig.room_length_m || roomTwinConfig.length_m || roomTwinConfig.room_length)) || 8.0);
+      const pad = 24;
+
+      // Uniform metric scale preserving true 1:1 physical aspect ratio
+      const scaleX = (w - 2 * pad) / Math.max(1.0, rw);
+      const scaleY = (h - 2 * pad) / Math.max(1.0, rl);
+      const scale = Math.min(scaleX, scaleY);
+
+      const offsetX = (w - rw * scale) / 2;
+      const offsetY = (h - rl * scale) / 2;
+
+      return { w, h, rw, rl, scale, offsetX, offsetY, pad };
+    }
+
+    function worldToCanvas(x_m, y_m) {
+      const g = getRadarGeometry();
+      const cx = g.offsetX + (x_m + g.rw / 2.0) * g.scale;
+      const cy = g.offsetY + y_m * g.scale;
+      return [cx, cy];
+    }
+
+    function canvasToWorld(cx, cy) {
+      const g = getRadarGeometry();
+      const x_m = (cx - g.offsetX) / g.scale - (g.rw / 2.0);
+      const y_m = (cy - g.offsetY) / g.scale;
+      return [x_m, y_m];
+    }
+
     // --- Click-to-Lock Target Selection Handler ---
     radarCanvas.addEventListener('click', async (e) => {
       const rect = radarCanvas.getBoundingClientRect();
-      const mouseX = e.clientX - rect.left;
-      const mouseY = e.clientY - rect.top;
-      const w = radarCanvas.width;
-      const h = radarCanvas.height;
+      const scaleX = radarCanvas.width / rect.width;
+      const scaleY = radarCanvas.height / rect.height;
+      const mouseX = (e.clientX - rect.left) * scaleX;
+      const mouseY = (e.clientY - rect.top) * scaleY;
 
-      // Convert pixel coordinates to tactical room coordinates (-5m to +5m X, 0m to 10m Y)
-      const roomX = (mouseX / w) * 10.0 - 5.0;
-      const roomY = (mouseY / h) * 10.0;
+      const [roomX, roomY] = canvasToWorld(mouseX, mouseY);
 
       let nearestTarget = null;
       let minDistance = 1.2; // 1.2m selection radius
@@ -514,6 +555,10 @@
       const body = {
         width_m: w,
         length_m: l,
+        room_width: w,
+        room_length: l,
+        room_width_m: w,
+        room_length_m: l,
         wall_material: mat,
         tx1_pos: parsePos(document.getElementById('twinTx1').value),
         tx2_pos: parsePos(document.getElementById('twinTx2').value),
@@ -527,7 +572,10 @@
         body: JSON.stringify(body)
       });
       const data = await res.json();
-      if (data.room_twin) roomTwinConfig = data.room_twin;
+      if (data.room_twin) {
+        roomTwinConfig = data.room_twin;
+        drawRadar(null, currentTargets, roomTwinConfig, null);
+      }
       closeRoomTwinModal();
     }
 
@@ -594,75 +642,92 @@
 
     // --- Interactive Radar & Digital Twin Rendering Engine ---
     function drawRadar(presenceState, targets, roomTwin, perimeterGate) {
-      const w = radarCanvas.width, h = radarCanvas.height;
-      radarCtx.clearRect(0, 0, w, h);
+      if (roomTwin) roomTwinConfig = roomTwin;
+      const g = getRadarGeometry();
+      radarCtx.clearRect(0, 0, g.w, g.h);
       radarPulsePhase = (radarPulsePhase + 0.05) % (Math.PI * 2);
 
-      // Coordinate transforms: Room X (-5 to +5), Room Y (0 to 10)
-      const toPx = (x, y) => [((x + 5.0) / 10.0) * w, (y / 10.0) * h];
-
-      // 1. Tactical 10m x 10m Grid
-      radarCtx.strokeStyle = 'rgba(0, 240, 255, 0.08)';
+      // 1. Dynamic 1-Meter Metric Radar Grid
+      radarCtx.strokeStyle = 'rgba(0, 240, 255, 0.07)';
       radarCtx.lineWidth = 1;
-      for (let i = 1; i < 10; i++) {
-        radarCtx.beginPath();
-        radarCtx.moveTo(i * w / 10, 0);
-        radarCtx.lineTo(i * w / 10, h);
-        radarCtx.stroke();
 
+      // Vertical grid lines (every 1.0m across room width)
+      const halfW = g.rw / 2.0;
+      for (let x = -Math.floor(halfW); x <= Math.floor(halfW); x += 1.0) {
+        const [gx1, gy1] = worldToCanvas(x, 0.0);
+        const [gx2, gy2] = worldToCanvas(x, g.rl);
         radarCtx.beginPath();
-        radarCtx.moveTo(0, i * h / 10);
-        radarCtx.lineTo(w, i * h / 10);
+        radarCtx.moveTo(gx1, gy1);
+        radarCtx.lineTo(gx2, gy2);
         radarCtx.stroke();
       }
 
-      // 2. Room Digital Twin Boundary & Specular Mirror Zones
-      const roomW = (roomTwin && roomTwin.width_m) ? roomTwin.width_m : 6.0;
-      const roomL = (roomTwin && roomTwin.length_m) ? roomTwin.length_m : 8.0;
-      const [rx1, ry1] = toPx(-roomW / 2, 0.0);
-      const [rx2, ry2] = toPx(roomW / 2, roomL);
+      // Horizontal grid lines (every 1.0m across room length)
+      for (let y = 0; y <= g.rl; y += 1.0) {
+        const [gx1, gy1] = worldToCanvas(-halfW, y);
+        const [gx2, gy2] = worldToCanvas(halfW, y);
+        radarCtx.beginPath();
+        radarCtx.moveTo(gx1, gy1);
+        radarCtx.lineTo(gx2, gy2);
+        radarCtx.stroke();
+      }
+
+      // 2. Room Digital Twin Boundary & Specular Mirror Wall Segments
+      const [rx1, ry1] = worldToCanvas(-halfW, 0.0);
+      const [rx2, ry2] = worldToCanvas(halfW, g.rl);
+      const wallW = rx2 - rx1;
+      const wallH = ry2 - ry1;
 
       radarCtx.save();
-      // Outer Room Shadow / Clutter Zone
-      radarCtx.fillStyle = 'rgba(255, 42, 85, 0.04)';
-      radarCtx.fillRect(0, 0, w, ry1);
-      radarCtx.fillRect(0, ry2, w, h - ry2);
-      radarCtx.fillRect(0, ry1, rx1, ry2 - ry1);
-      radarCtx.fillRect(rx2, ry1, w - rx2, ry2 - ry1);
+      // Outer Room Shadow / Clutter Zone (attenuation area)
+      radarCtx.fillStyle = 'rgba(255, 42, 85, 0.05)';
+      radarCtx.fillRect(0, 0, g.w, ry1);
+      radarCtx.fillRect(0, ry2, g.w, g.h - ry2);
+      radarCtx.fillRect(0, ry1, rx1, wallH);
+      radarCtx.fillRect(rx2, ry1, g.w - rx2, wallH);
 
-      // Physical Room Wall Boundary
-      radarCtx.strokeStyle = 'rgba(0, 240, 255, 0.5)';
-      radarCtx.lineWidth = 2;
-      radarCtx.setLineDash([6, 4]);
-      radarCtx.strokeRect(rx1, ry1, rx2 - rx1, ry2 - ry1);
+      // Physical Room Wall Perimeter
+      radarCtx.strokeStyle = 'rgba(0, 240, 255, 0.7)';
+      radarCtx.lineWidth = 2.5;
+      radarCtx.setLineDash([8, 4]);
+      radarCtx.strokeRect(rx1, ry1, wallW, wallH);
       radarCtx.setLineDash([]);
 
-      // Wall Labels
-      radarCtx.fillStyle = 'rgba(0, 240, 255, 0.6)';
-      radarCtx.font = '10px monospace';
-      radarCtx.fillText(`ROOM TWIN: ${roomW}m × ${roomL}m [${roomTwin.wall_material || 'CONCRETE'}]`, rx1 + 10, ry1 + 16);
+      // Wall Dimensions & Material Callout
+      const matName = (roomTwin && roomTwin.wall_material) || roomTwinConfig.wall_material || 'CONCRETE';
+      radarCtx.fillStyle = 'rgba(0, 240, 255, 0.85)';
+      radarCtx.font = 'bold 10px monospace';
+      radarCtx.fillText(`📐 ROOM TWIN: ${g.rw.toFixed(1)}m × ${g.rl.toFixed(1)}m [${matName}]`, rx1 + 10, ry1 + 16);
       radarCtx.restore();
 
       // 3. Perimeter Sensing Gate Radius Ring (IFFT CIR Cutoff)
       const maxR = (perimeterGate && perimeterGate.max_radius_m) ? perimeterGate.max_radius_m : 4.0;
-      const [rxPosPx, ryPosPx] = toPx(0.0, 0.0);
-      const radiusPx = (maxR / 10.0) * h;
+      let rxX = 0.0, rxY = 0.0;
+      if (roomTwin && roomTwin.nodes && roomTwin.nodes.rx) {
+        rxX = roomTwin.nodes.rx.x;
+        rxY = roomTwin.nodes.rx.y;
+      } else if (roomTwin && roomTwin.rx_pos) {
+        rxX = roomTwin.rx_pos[0];
+        rxY = roomTwin.rx_pos[1];
+      }
+      const [rxPosPx, ryPosPx] = worldToCanvas(rxX, rxY);
+      const radiusPx = maxR * g.scale;
+
       radarCtx.save();
-      radarCtx.strokeStyle = 'rgba(255, 170, 0, 0.35)';
+      radarCtx.strokeStyle = 'rgba(255, 170, 0, 0.4)';
       radarCtx.lineWidth = 1.5;
       radarCtx.setLineDash([4, 4]);
       radarCtx.beginPath();
-      radarCtx.arc(rxPosPx, ryPosPx, radiusPx, 0, Math.PI);
+      radarCtx.arc(rxPosPx, ryPosPx, radiusPx, 0, Math.PI * 2);
       radarCtx.stroke();
-      radarCtx.fillStyle = 'rgba(255, 170, 0, 0.6)';
+      radarCtx.fillStyle = 'rgba(255, 170, 0, 0.7)';
       radarCtx.font = '9px monospace';
       radarCtx.fillText(`CIR GATE: ${maxR.toFixed(1)}m`, rxPosPx + 10, ryPosPx + radiusPx - 6);
       radarCtx.restore();
 
-      // 4. Render Physical Nodes (TX1, TX2, RX, AP)
-      const drawNode = (pos, color, label, shape) => {
-        if (!pos || pos.length < 2) return;
-        const [nx, ny] = toPx(pos[0], pos[1]);
+      // 4. Render Physical Nodes at EXACT Configured Digital Twin Coordinates
+      const drawNode = (nx_m, ny_m, color, label, shape) => {
+        const [nx, ny] = worldToCanvas(nx_m, ny_m);
         radarCtx.save();
         radarCtx.fillStyle = color;
         radarCtx.strokeStyle = color;
@@ -689,12 +754,16 @@
         radarCtx.restore();
       };
 
-      if (roomTwin) {
-        drawNode(roomTwin.tx1_pos || [-2.0, 0.0], '#00f0ff', 'TX1 (100Hz)', 'triangle');
-        drawNode(roomTwin.tx2_pos || [2.0, 0.0], '#00ff88', 'TX2 (75Hz)', 'triangle');
-        drawNode(roomTwin.rx_pos || [0.0, 0.0], '#ffaa00', 'RX (921.6k)', 'circle');
-        drawNode(roomTwin.ap_pos || [0.0, 6.0], '#b388ff', 'SAM 4G AP', 'diamond');
-      }
+      const nodes = (roomTwin && roomTwin.nodes) || (roomTwinConfig && roomTwinConfig.nodes) || {};
+      const tx1Coord = nodes.tx1 || { x: (roomTwin && roomTwin.tx1_pos ? roomTwin.tx1_pos[0] : -2.0), y: (roomTwin && roomTwin.tx1_pos ? roomTwin.tx1_pos[1] : 0.0) };
+      const tx2Coord = nodes.tx2 || { x: (roomTwin && roomTwin.tx2_pos ? roomTwin.tx2_pos[0] : 2.0), y: (roomTwin && roomTwin.tx2_pos ? roomTwin.tx2_pos[1] : 0.0) };
+      const rxCoord  = nodes.rx  || { x: rxX, y: rxY };
+      const apCoord  = nodes.ap  || { x: (roomTwin && roomTwin.ap_pos ? roomTwin.ap_pos[0] : 0.0), y: (roomTwin && roomTwin.ap_pos ? roomTwin.ap_pos[1] : 6.0) };
+
+      drawNode(tx1Coord.x, tx1Coord.y, '#00f0ff', `TX1 [${tx1Coord.x}, ${tx1Coord.y}]`, 'triangle');
+      drawNode(tx2Coord.x, tx2Coord.y, '#00ff88', `TX2 [${tx2Coord.x}, ${tx2Coord.y}]`, 'triangle');
+      drawNode(rxCoord.x, rxCoord.y, '#ffaa00', `RX [${rxCoord.x}, ${rxCoord.y}]`, 'circle');
+      drawNode(apCoord.x, apCoord.y, '#b388ff', `SAM 4G [${apCoord.x}, ${apCoord.y}]`, 'diamond');
 
       // --- EMPTY ROOM STATE ---
       if (!targets || targets.length === 0 || presenceState === "EMPTY_ROOM") {
@@ -702,26 +771,26 @@
         radarCtx.fillStyle = 'rgba(100, 140, 170, 0.4)';
         radarCtx.font = 'bold 14px monospace';
         radarCtx.textAlign = 'center';
-        radarCtx.fillText('SECTOR CLEAR // NO BIOMETRIC SCATTERING', w / 2, h / 2 + 10);
+        radarCtx.fillText('SECTOR CLEAR // NO BIOMETRIC SCATTERING', g.w / 2, g.h / 2 + 10);
         radarCtx.font = '11px monospace';
-        radarCtx.fillText('الغرفة خالية تماماً من أي نشاط حيوي', w / 2, h / 2 + 30);
+        radarCtx.fillText('الغرفة خالية تماماً من أي نشاط حيوي', g.w / 2, g.h / 2 + 30);
         radarCtx.restore();
         return;
       }
 
       // --- MULTI-TARGET RENDERING ---
       targets.forEach((t) => {
-        const [px, py] = toPx(t.x, t.y);
+        const [px, py] = worldToCanvas(t.x, t.y);
 
         const isUnknown = (t.identity === 'UNKNOWN TARGET');
-        const isStatic = (t.status === 'STATIC_VITAL');
-        const color = isUnknown ? '#ff2a55' : '#00ff88';
+        const isStationaryLocked = (t.status === 'STATIONARY_LOCKED' || t.status === 'STATIC_VITAL');
+        const color = isUnknown ? '#ff2a55' : (isStationaryLocked ? '#00f0ff' : '#00ff88');
 
-        // 1. Draw Historical Trajectory Trail
+        // 1. Historical Trajectory Trail
         if (t.trail && t.trail.length > 1) {
           radarCtx.beginPath();
           t.trail.forEach((pt, idx) => {
-            const [tx, ty] = toPx(pt[0], pt[1]);
+            const [tx, ty] = worldToCanvas(pt[0], pt[1]);
             if (idx === 0) radarCtx.moveTo(tx, ty);
             else radarCtx.lineTo(tx, ty);
           });
@@ -732,8 +801,8 @@
           radarCtx.globalAlpha = 1.0;
         }
 
-        // 2. Velocity Vector Arrow
-        if (Math.hypot(t.vx, t.vy) > 0.05) {
+        // 2. Velocity Vector Arrow: ONLY rendered for active MOVING targets
+        if (!isStationaryLocked && Math.hypot(t.vx, t.vy) > 0.05) {
           const arrowLen = 18;
           const ax = px + (t.vx * arrowLen);
           const ay = py + (t.vy * arrowLen);
@@ -745,7 +814,7 @@
           radarCtx.stroke();
         }
 
-        // 3. Selection Double-Reticle Ring (Cyan)
+        // 3. Selection Reticle Ring (Cyan)
         if (t.selected) {
           radarCtx.save();
           radarCtx.strokeStyle = '#00f0ff';
@@ -765,16 +834,23 @@
           radarCtx.restore();
         }
 
-        // 4. Target Marker (Pulsing Beacon or Diamond)
+        // 4. Target Marker (Steady Pin for STATIONARY_LOCKED, Diamond for Unknown, Circle for Moving)
         radarCtx.save();
         radarCtx.fillStyle = color;
         radarCtx.shadowColor = color;
         radarCtx.shadowBlur = 10;
 
-        if (isStatic) {
-          const pulseR = 7 + Math.sin(radarPulsePhase) * 2;
+        if (isStationaryLocked) {
+          // Steady, non-jittering pulsing pin & vital reticle
+          const pulseR = 8 + Math.sin(radarPulsePhase) * 2;
           radarCtx.beginPath();
           radarCtx.arc(px, py, pulseR, 0, Math.PI * 2);
+          radarCtx.strokeStyle = color;
+          radarCtx.lineWidth = 2;
+          radarCtx.stroke();
+
+          radarCtx.beginPath();
+          radarCtx.arc(px, py, 4, 0, Math.PI * 2);
           radarCtx.fill();
         } else if (isUnknown) {
           radarCtx.beginPath();
@@ -790,16 +866,17 @@
           radarCtx.fill();
         }
 
-        // 5. Target Tactical Callout Label
+        // 5. Target Tactical Callout Label & Status Badge
         radarCtx.shadowBlur = 0;
         radarCtx.fillStyle = '#fff';
         radarCtx.font = 'bold 11px monospace';
         const labelText = `#${t.track_id} ${t.identity}`;
-        radarCtx.fillText(labelText, px + 12, py - 6);
+        radarCtx.fillText(labelText, px + 14, py - 6);
 
+        const statusBadge = isStationaryLocked ? 'LOCKED / STATIONARY' : t.status;
         radarCtx.fillStyle = color;
-        radarCtx.font = '9px monospace';
-        radarCtx.fillText(`[${t.status}] (${t.x.toFixed(1)}m, ${t.y.toFixed(1)}m)`, px + 12, py + 8);
+        radarCtx.font = 'bold 9px monospace';
+        radarCtx.fillText(`[${statusBadge}] (${t.x.toFixed(1)}m, ${t.y.toFixed(1)}m)`, px + 14, py + 8);
         radarCtx.restore();
       });
     }

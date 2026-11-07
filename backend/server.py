@@ -42,13 +42,18 @@ class PerimeterGateRequest(BaseModel):
 
 
 class RoomTwinRequest(BaseModel):
-    width_m: float = 6.0
-    length_m: float = 8.0
+    width_m: Optional[float] = None
+    length_m: Optional[float] = None
+    room_width: Optional[float] = None
+    room_length: Optional[float] = None
+    room_width_m: Optional[float] = None
+    room_length_m: Optional[float] = None
     wall_material: str = "CONCRETE"
-    tx1_pos: List[float] = [-2.0, 0.0]
-    tx2_pos: List[float] = [2.0, 0.0]
-    rx_pos: List[float] = [0.0, 0.0]
-    ap_pos: List[float] = [0.0, 6.0]
+    tx1_pos: Optional[List[float]] = None
+    tx2_pos: Optional[List[float]] = None
+    rx_pos: Optional[List[float]] = None
+    ap_pos: Optional[List[float]] = None
+    nodes: Optional[Dict[str, dict]] = None
 
 
 class BenchmarkLogRequest(BaseModel):
@@ -301,14 +306,17 @@ async def get_room_twin():
 
 @app.post("/api/room_twin")
 async def update_room_twin(req: RoomTwinRequest):
+    w = req.width_m if req.width_m is not None else (req.room_width if req.room_width is not None else req.room_width_m)
+    l = req.length_m if req.length_m is not None else (req.room_length if req.room_length is not None else req.room_length_m)
     cfg = engine.configure_room_twin(
-        width_m=req.width_m,
-        length_m=req.length_m,
+        width_m=w,
+        length_m=l,
         wall_material=req.wall_material,
         tx1_pos=req.tx1_pos,
         tx2_pos=req.tx2_pos,
         rx_pos=req.rx_pos,
-        ap_pos=req.ap_pos
+        ap_pos=req.ap_pos,
+        nodes=req.nodes
     )
     return {"status": "ROOM_TWIN_CONFIGURED", "room_twin": cfg}
 

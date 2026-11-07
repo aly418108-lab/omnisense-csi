@@ -34,7 +34,7 @@ class CrowdResult(int):
 
 
 class TargetTrack:
-    """4-State Kinematic Target Track with Spatial CSI Signature and Gait Biometrics."""
+    """4-State Kinematic Target Track with Spatial CSI Signature, Strict Identity Binding & Stationary Lock."""
     def __init__(self, track_id: int, init_pos: np.ndarray, dt: float = 0.01):
         self.track_id = track_id
         # State: [x, y, vx, vy]^T
@@ -44,15 +44,24 @@ class TargetTrack:
         self.kf_F = np.array([
             [1.0, 0.0, self.dt, 0.0],
             [0.0, 1.0, 0.0, self.dt],
-            [0.0, 0.0, 0.92, 0.0],
-            [0.0, 0.0, 0.0, 0.92]
+            [0.0, 0.0, 0.995, 0.0],
+            [0.0, 0.0, 0.0, 0.995]
         ], dtype=np.float64)
         self.kf_H = np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], dtype=np.float64)
         self.kf_Q = np.diag([0.005, 0.005, 0.08, 0.08])
 
+        # Strict identity binding
         self.identity_label = "UNKNOWN TARGET"
+        self.locked_identity: Optional[str] = None
+        self.identity_confidence: float = 0.0
         self.mahalanobis_dist = 99.9
-        self.status = "MOVING"  # "MOVING" | "STATIC_VITAL"
+
+        # Dual-regime status: "MOVING" | "STATIONARY_LOCKED" | "STATIC_VITAL"
+        self.status = "MOVING"
+        self.pinned_pos: Optional[np.ndarray] = None
+        self.low_speed_duration: float = 0.0
+        self.presence_hold_remaining: float = 60.0
+
         self.spatial_subcarrier_weights = np.ones(50, dtype=np.float64)
         self.component_trace = np.zeros(100, dtype=np.float64)
         self.missed_count = 0
@@ -61,11 +70,34 @@ class TargetTrack:
         self.selected = False
 
     def predict(self):
+        if self.status in ("STATIONARY_LOCKED", "STATIC_VITAL") and self.pinned_pos is not None:
+            # Zero-velocity coordinate pinning: suppress random-walk jitter
+            self.kf_state[:2] = self.pinned_pos
+            self.kf_state[2:] = 0.0
+            self.kf_P = np.diag([0.001, 0.001, 0.001, 0.001])
+            self.age += 1
+            return
+
         self.kf_state = self.kf_F @ self.kf_state
         self.kf_P = self.kf_F @ self.kf_P @ self.kf_F.T + self.kf_Q
         self.age += 1
 
-    def update(self, z: np.ndarray, r_scale: float = 0.08):
+    def update(self, z: np.ndarray, r_scale: float = 0.08, is_motion_active: bool = False):
+        if self.status in ("STATIONARY_LOCKED", "STATIC_VITAL") and self.pinned_pos is not None:
+            disp = float(np.linalg.norm(z - self.pinned_pos))
+            if disp > 0.35 or is_motion_active:
+                # Subject has resumed active locomotion
+                self.status = "MOVING"
+                self.pinned_pos = None
+                self.low_speed_duration = 0.0
+                self.presence_hold_remaining = 60.0
+            else:
+                # Retain pinned coordinates and clamp velocity
+                self.kf_state[:2] = self.pinned_pos
+                self.kf_state[2:] = 0.0
+                self.missed_count = 0
+                return
+
         R_cov = np.eye(2, dtype=np.float64) * r_scale
         y_res = z - (self.kf_H @ self.kf_state)
         S_cov = self.kf_H @ self.kf_P @ self.kf_H.T + R_cov
@@ -73,6 +105,19 @@ class TargetTrack:
         self.kf_state = self.kf_state + (K_gain @ y_res)
         self.kf_P = (np.eye(4, dtype=np.float64) - K_gain @ self.kf_H) @ self.kf_P
         self.missed_count = 0
+
+        # Check speed & motion for stationary lock
+        if self.speed < 0.08 and not is_motion_active:
+            self.low_speed_duration += 0.1
+            if self.low_speed_duration >= 1.0:
+                self.status = "STATIONARY_LOCKED"
+                self.pinned_pos = np.copy(self.kf_state[:2])
+                self.kf_state[2:] = 0.0
+                self.presence_hold_remaining = 60.0
+        else:
+            self.low_speed_duration = 0.0
+            self.status = "MOVING"
+            self.pinned_pos = None
 
         # Update smoothed trail
         curr_pt = [round(float(self.kf_state[0]), 2), round(float(self.kf_state[1]), 2)]
@@ -133,6 +178,8 @@ class OmniSenseDSPEngine:
         self.instant_motion_energy = 0.0
         self.instant_vital_snr = 0.0
         self.estimated_crowd_count = 0
+        self.pending_crowd_count = 0
+        self.crowd_hysteresis_start_time = 0.0
         self.von_neumann_entropy = 0.0
         self.eigenvalue_spectrum: List[float] = []
 
@@ -153,17 +200,35 @@ class OmniSenseDSPEngine:
         # ---------------------------------------------------------------------
         # 5. Subsystem D: Panorama-Guided RF Digital Twin & Multipath Ghost Folding
         # ---------------------------------------------------------------------
+        w_init = 6.0
+        l_init = 8.0
+        w_half = w_init / 2.0
         self.room_twin = {
-            "room_width_m": 4.5,
-            "room_length_m": 4.0,
-            "wall_material": "Concrete",  # "Concrete" | "Brick" | "Drywall"
-            "reflection_coeff": 0.75,
+            "room_width": w_init,
+            "room_length": l_init,
+            "room_width_m": w_init,
+            "room_length_m": l_init,
+            "width_m": w_init,
+            "length_m": l_init,
+            "wall_material": "CONCRETE",
+            "wall_attenuation_db": 12.0,
+            "reflection_coeff": 0.85,
             "nodes": {
-                "tx1": {"x": -1.8, "y": 1.0, "label": "ESP32-TX1 (100 Hz)"},
-                "tx2": {"x": 1.8, "y": 1.0, "label": "ESP32-TX2 (75 Hz)"},
-                "rx":  {"x": 0.0, "y": 0.5, "label": "ESP32-RX Radar"},
-                "ap":  {"x": 0.0, "y": 7.0, "label": "SAM 4G AP"}
+                "tx1": {"x": -2.0, "y": 0.0, "label": "ESP32-TX1 (100 Hz)"},
+                "tx2": {"x": 2.0, "y": 0.0, "label": "ESP32-TX2 (75 Hz)"},
+                "rx":  {"x": 0.0, "y": 0.0, "label": "ESP32-RX Radar"},
+                "ap":  {"x": 0.0, "y": 6.0, "label": "SAM 4G AP"}
             },
+            "walls": [
+                {"name": "South Wall", "x1": -w_half, "y1": 0.0, "x2": w_half, "y2": 0.0, "material": "CONCRETE"},
+                {"name": "North Wall", "x1": -w_half, "y1": l_init, "x2": w_half, "y2": l_init, "material": "CONCRETE"},
+                {"name": "West Wall",  "x1": -w_half, "y1": 0.0, "x2": -w_half, "y2": l_init, "material": "CONCRETE"},
+                {"name": "East Wall",  "x1": w_half, "y1": 0.0, "x2": w_half, "y2": l_init, "material": "CONCRETE"},
+            ],
+            "tx1_pos": [-2.0, 0.0],
+            "tx2_pos": [2.0, 0.0],
+            "rx_pos": [0.0, 0.0],
+            "ap_pos": [0.0, 6.0],
             "floorplan_image": None
         }
         self.ghosts_folded_count = 0
@@ -226,14 +291,24 @@ class OmniSenseDSPEngine:
                             tx1_pos: Optional[List[float]] = None, tx2_pos: Optional[List[float]] = None,
                             rx_pos: Optional[List[float]] = None, ap_pos: Optional[List[float]] = None,
                             room_width_m: Optional[float] = None, room_length_m: Optional[float] = None,
+                            room_width: Optional[float] = None, room_length: Optional[float] = None,
                             nodes: Optional[Dict[str, dict]] = None, floorplan_image: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-        """Updates room geometry, wall material and hardware node coordinates."""
-        w = width_m if width_m is not None else (room_width_m if room_width_m is not None else self.room_twin.get("room_width_m", 6.0))
-        l = length_m if length_m is not None else (room_length_m if room_length_m is not None else self.room_twin.get("room_length_m", 8.0))
-        self.room_twin["room_width_m"] = max(2.0, float(w))
-        self.room_twin["room_length_m"] = max(2.0, float(l))
-        self.room_twin["width_m"] = self.room_twin["room_width_m"]
-        self.room_twin["length_m"] = self.room_twin["room_length_m"]
+        """Updates room geometry, wall material, boundary wall segments and hardware node coordinates."""
+        candidates_w = [width_m, room_width_m, room_width, kwargs.get("width"), kwargs.get("room_w")]
+        w = next((v for v in candidates_w if v is not None), self.room_twin.get("room_width_m", 6.0))
+        candidates_l = [length_m, room_length_m, room_length, kwargs.get("length"), kwargs.get("room_l")]
+        l = next((v for v in candidates_l if v is not None), self.room_twin.get("room_length_m", 8.0))
+
+        w_val = max(2.0, float(w))
+        l_val = max(2.0, float(l))
+        w_half = w_val / 2.0
+
+        self.room_twin["room_width"] = w_val
+        self.room_twin["room_length"] = l_val
+        self.room_twin["room_width_m"] = w_val
+        self.room_twin["room_length_m"] = l_val
+        self.room_twin["width_m"] = w_val
+        self.room_twin["length_m"] = l_val
         self.room_twin["wall_material"] = wall_material
 
         mat_upper = wall_material.upper()
@@ -271,6 +346,14 @@ class OmniSenseDSPEngine:
             for k, v in nodes.items():
                 if k in self.room_twin["nodes"]:
                     self.room_twin["nodes"][k].update(v)
+
+        # Dynamic wall boundary segments
+        self.room_twin["walls"] = [
+            {"name": "South Wall", "x1": -w_half, "y1": 0.0, "x2": w_half, "y2": 0.0, "material": wall_material},
+            {"name": "North Wall", "x1": -w_half, "y1": l_val, "x2": w_half, "y2": l_val, "material": wall_material},
+            {"name": "West Wall",  "x1": -w_half, "y1": 0.0, "x2": -w_half, "y2": l_val, "material": wall_material},
+            {"name": "East Wall",  "x1": w_half, "y1": 0.0, "x2": w_half, "y2": l_val, "material": wall_material},
+        ]
 
         if floorplan_image:
             self.room_twin["floorplan_image"] = floorplan_image
@@ -418,8 +501,8 @@ class OmniSenseDSPEngine:
 
     def estimate_crowd_count(self, custom_H: Optional[np.ndarray] = None) -> Any:
         """
-        Unbounded Crowd Counter via RMT Marchenko-Pastur & MDL Criterion.
-        Replaces FastICA person splitting with an exact spatial subspace rank estimation.
+        Unbounded Crowd Counter via Motion-Adaptive RMT Marchenko-Pastur & MDL Criterion.
+        Absorbs limb micro-Doppler reflections into dominant eigenvalue via adaptive diagonal loading.
         Returns: CrowdResult(k, sorted_eigenvalues, von_neumann_entropy)
         """
         if custom_H is not None:
@@ -433,27 +516,41 @@ class OmniSenseDSPEngine:
 
         X_center = X_dyn - np.mean(X_dyn, axis=0)
 
-        # Spatial-temporal covariance matrix R_HH (M x M)
+        # 1. Wideband Doppler motion variance & Adaptive Diagonal Loading
+        sigma_motion_sq = float(np.mean(np.var(X_dyn, axis=0)))
+        ref_n = max(1e-6, getattr(self, "ref_noise_energy", 0.005))
+        alpha = float(min(0.25, 0.05 * (sigma_motion_sq / ref_n)))
+
+        # Spatial-temporal covariance matrix R_HH with motion-adaptive diagonal loading
         R_HH = (X_center.T @ X_center) / float(max(1, w_len))
+        R_HH += alpha * np.eye(R_HH.shape[0])
+
         eigvals = np.linalg.eigvalsh(R_HH)
         eigvals = np.sort(np.maximum(1e-12, eigvals))[::-1]  # Sort descending
 
         M = len(eigvals)
         W = max(2, w_len)
 
-        # 1. Von Neumann Eigenvalue Spectral Entropy
+        # 2. Von Neumann Eigenvalue Spectral Entropy
         p_eig = eigvals / (np.sum(eigvals) + 1e-12)
         s_eig = float(-np.sum(p_eig * np.log(p_eig + 1e-12)))
 
-        # 2. Strict Single-Person Dominant Rank-1 Mode Check
+        # 3. Dynamic Marchenko-Pastur Noise Ceiling scaled by motion bursts
+        gamma = float(M) / float(W)
+        sigma_noise_sq = float(np.median(eigvals))
+        mp_noise_ceiling = sigma_noise_sq * (1.0 + np.sqrt(gamma)) ** 2
+        burst_scale = 1.0 + 2.0 * min(10.0, sigma_motion_sq / ref_n)
+        dynamic_ceiling = mp_noise_ceiling * burst_scale
+
+        # 4. Strict Single-Person Dominant Rank-1 Mode Check
         denom_tail = float(np.sum(eigvals[1:])) + 1e-12
         coherence_ratio = float(eigvals[0] / denom_tail)
 
-        if coherence_ratio > 1.45:
-            # Absolute mathematical guarantee: exactly 1 target, no person splitting
+        # If secondary limb reflections fall below dynamic noise ceiling or coherence dominates
+        if coherence_ratio > 1.35 or (len(eigvals) > 1 and eigvals[1] <= dynamic_ceiling):
             return CrowdResult(1, eigvals[:10].tolist(), round(s_eig, 2))
 
-        # 3. Minimum Description Length (MDL) Wax-Kailath Model Order Selection
+        # 5. Minimum Description Length (MDL) Wax-Kailath Model Order Selection
         mdl_costs = []
         for k in range(0, min(15, M - 1)):
             tail = eigvals[k:]
@@ -564,13 +661,18 @@ class OmniSenseDSPEngine:
         macro_doppler_e = float(np.sum(psd_motion[macro_mask])) if np.any(macro_mask) else 0.0
 
         motion_thresh = 2.2 * self.ref_noise_energy
-        vital_snr_thresh = 4.5  # dB
+        vital_snr_thresh = 3.5  # dB
 
         is_moving = (self.instant_motion_energy >= motion_thresh) or (macro_doppler_e > 0.001)
+        self.is_motion_active = is_moving
         has_vital = self.instant_vital_snr >= vital_snr_thresh
+        has_stationary_hold = any(
+            t.status in ("STATIONARY_LOCKED", "STATIC_VITAL") and t.presence_hold_remaining > 0
+            for t in self.tracks
+        )
 
         # --- Rule 1: Empty Room ---
-        if not is_moving and not has_vital:
+        if not is_moving and not has_vital and not has_stationary_hold:
             self.empty_room_frames += 1
             if self.empty_room_frames >= int(2.5 * self.fs):
                 self.presence_state = "EMPTY_ROOM"
@@ -584,51 +686,88 @@ class OmniSenseDSPEngine:
             self.empty_room_frames = 0
 
         # --- Rule 2: Static Vital Presence (Green Point) ---
-        if not is_moving and has_vital:
+        if not is_moving and (has_vital or has_stationary_hold):
             self.presence_state = "STATIC_VITAL"
-            self.estimated_crowd_count = 1
             if len(self.tracks) == 0:
                 init_x = 0.0
                 init_y = 4.0
                 new_track = TargetTrack(self.next_track_id, np.array([init_x, init_y]), dt=self.dt)
                 self.next_track_id += 1
                 new_track.status = "STATIC_VITAL"
+                new_track.pinned_pos = np.array([init_x, init_y])
                 new_track.identity_label = "STATIC SUBJECT"
+                new_track.presence_hold_remaining = 60.0
                 self.tracks.append(new_track)
+                self.estimated_crowd_count = 1
             else:
                 if len(self.tracks) > 1:
                     self.tracks = [self.tracks[0]]
                 self.tracks[0].status = "STATIC_VITAL"
                 self.tracks[0].identity_label = "STATIC SUBJECT"
                 self.tracks[0].missed_count = 0
-                self.tracks[0].kf_state[2] = 0.0
-                self.tracks[0].kf_state[3] = 0.0
+                self.tracks[0].kf_state[2:] = 0.0
+                self.tracks[0].pinned_pos = np.copy(self.tracks[0].kf_state[:2])
+                self.tracks[0].presence_hold_remaining = 60.0
+                self.estimated_crowd_count = 1
             return
 
         # --- Rule 3: Active Motion / Unbounded Crowd Tracking ---
-        # Predict Kalman states
         for trk in self.tracks:
             trk.predict()
 
         # Execute RMT-MDL Crowd Counting & Multi-Target Localization every 10 frames (100 ms)
         if self.pkt_count % 10 == 0:
             crowd_k, eigvals, s_entropy = self.estimate_crowd_count()
-            self.estimated_crowd_count = crowd_k
             self.eigenvalue_spectrum = eigvals
             self.von_neumann_entropy = s_entropy
 
             candidate_obs, comp_weights = self._extract_multipath_candidates(crowd_k)
-            self._associate_and_update_tracks(candidate_obs, comp_weights, crowd_k)
+
+            # Temporal Hysteresis on Crowd Count
+            now = time.time()
+            if self.estimated_crowd_count == 0 and crowd_k >= 1:
+                self.estimated_crowd_count = crowd_k
+                self.pending_crowd_count = crowd_k
+                self.crowd_hysteresis_start_time = now
+            elif crowd_k > self.estimated_crowd_count:
+                has_spatial_sep = False
+                if len(candidate_obs) >= 2:
+                    min_sep = min(
+                        float(np.linalg.norm(candidate_obs[i] - candidate_obs[j]))
+                        for i in range(len(candidate_obs))
+                        for j in range(i + 1, len(candidate_obs))
+                    )
+                    has_spatial_sep = (min_sep > 1.0)
+
+                if has_spatial_sep:
+                    if crowd_k != self.pending_crowd_count:
+                        self.pending_crowd_count = crowd_k
+                        self.crowd_hysteresis_start_time = now
+                    elif (now - self.crowd_hysteresis_start_time) >= 2.5:
+                        self.estimated_crowd_count = crowd_k
+                else:
+                    self.pending_crowd_count = self.estimated_crowd_count
+            elif crowd_k < self.estimated_crowd_count:
+                if crowd_k != self.pending_crowd_count:
+                    self.pending_crowd_count = crowd_k
+                    self.crowd_hysteresis_start_time = now
+                elif (now - self.crowd_hysteresis_start_time) >= 1.5:
+                    self.estimated_crowd_count = crowd_k
+            else:
+                self.pending_crowd_count = crowd_k
+                self.crowd_hysteresis_start_time = now
+
+            self._associate_and_update_tracks(candidate_obs, comp_weights, self.estimated_crowd_count)
 
         self.presence_state = "ACTIVE_MOTION" if self.estimated_crowd_count <= 1 else "ACTIVE_MULTI"
 
     def _extract_multipath_candidates(self, crowd_k: int) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         """
         Extracts spatial 2D candidate positions using dual-link bistatic sub-bands,
-        applies perimeter range gating and folds multipath mirror reflections.
+        applies perimeter range gating, folds multipath mirror reflections, and
+        clusters torso/limb peaks within r_merge = 0.85m into unified weighted centroids.
         """
-        candidates: List[np.ndarray] = []
-        weights_list: List[np.ndarray] = []
+        raw_candidates: List[Tuple[np.ndarray, np.ndarray, float]] = []
 
         recent_dyn = self.amp_ring[-100:, :]
         ratio_angles = np.angle(self.ratio_ring[-20:, :])
@@ -664,23 +803,37 @@ class OmniSenseDSPEngine:
             if not is_valid:
                 continue
 
-            # 3. Spatial NMS Clustering (< 1.2m)
-            too_close = False
-            for exist_pos in candidates:
-                if np.linalg.norm(folded_pos - exist_pos) < 1.2:
-                    too_close = True
-                    break
+            raw_candidates.append((folded_pos, w[:50] / (np.linalg.norm(w[:50]) + 1e-8), sub_energy))
 
-            if not too_close:
-                candidates.append(folded_pos)
-                weights_list.append(w[:50] / (np.linalg.norm(w[:50]) + 1e-8))
+        # Spatial-Biometric Clustering Gate: Merge peaks within r_merge = 0.85m
+        clustered_pos: List[np.ndarray] = []
+        clustered_weights: List[np.ndarray] = []
+        cluster_energies: List[float] = []
+
+        for cand_pos, w_vec, eng in raw_candidates:
+            merged = False
+            for c_idx in range(len(clustered_pos)):
+                dist = float(np.linalg.norm(cand_pos - clustered_pos[c_idx]))
+                if dist <= 0.85:
+                    e_prev = cluster_energies[c_idx]
+                    e_tot = e_prev + eng + 1e-8
+                    clustered_pos[c_idx] = (e_prev * clustered_pos[c_idx] + eng * cand_pos) / e_tot
+                    clustered_weights[c_idx] = (e_prev * clustered_weights[c_idx] + eng * w_vec) / e_tot
+                    cluster_energies[c_idx] = e_tot
+                    merged = True
+                    break
+            if not merged:
+                clustered_pos.append(cand_pos)
+                clustered_weights.append(w_vec)
+                cluster_energies.append(eng)
 
         # Guarantee: if crowd_k == 1, force candidates to be exactly 1 dominant target
-        if crowd_k == 1 and len(candidates) > 1:
-            candidates = [candidates[0]]
-            weights_list = [weights_list[0]]
+        if crowd_k == 1 and len(clustered_pos) > 1:
+            best_idx = int(np.argmax(cluster_energies))
+            clustered_pos = [clustered_pos[best_idx]]
+            clustered_weights = [clustered_weights[best_idx]]
 
-        return candidates, weights_list
+        return clustered_pos, clustered_weights
 
     def _associate_and_update_tracks(self, candidate_obs: List[np.ndarray], comp_weights: List[np.ndarray], target_cap: int):
         """Associates candidate observations with tracks via Hungarian algorithm, scaled by crowd count."""
@@ -693,13 +846,19 @@ class OmniSenseDSPEngine:
                 self.next_track_id += 1
                 trk.spatial_subcarrier_weights = w
                 trk.status = "MOVING"
+                trk.identity_label = "UNKNOWN TARGET"
                 self.tracks.append(trk)
             return
 
         if n_obs == 0:
             for trk in self.tracks:
+                if trk.status in ("STATIONARY_LOCKED", "STATIC_VITAL"):
+                    if self.instant_vital_snr >= 3.5 or trk.presence_hold_remaining > 0:
+                        trk.presence_hold_remaining = max(0.0, trk.presence_hold_remaining - 0.1)
+                        trk.missed_count = 0
+                        continue
                 trk.missed_count += 1
-            self.tracks = [t for t in self.tracks if t.missed_count <= 25]
+            self.tracks = [t for t in self.tracks if t.missed_count <= 25 or (t.status in ("STATIONARY_LOCKED", "STATIC_VITAL") and t.presence_hold_remaining > 0)]
             return
 
         # Cost matrix: Euclidean distance
@@ -713,27 +872,39 @@ class OmniSenseDSPEngine:
         row_ind, col_ind = optimize.linear_sum_assignment(cost_matrix)
         assigned_tracks = set()
         assigned_obs = set()
+        is_active_motion = getattr(self, "is_motion_active", False)
 
         for r, c in zip(row_ind, col_ind):
-            if cost_matrix[r, c] < 3.2:
-                self.tracks[r].update(candidate_obs[c])
-                self.tracks[r].spatial_subcarrier_weights = comp_weights[c]
-                self.tracks[r].status = "MOVING"
+            trk = self.tracks[r]
+            gate_thresh = 0.85 if trk.status in ("STATIONARY_LOCKED", "STATIC_VITAL") else 2.2
+            if cost_matrix[r, c] < gate_thresh:
+                trk.update(candidate_obs[c], is_motion_active=is_active_motion)
+                trk.spatial_subcarrier_weights = comp_weights[c]
                 assigned_tracks.add(r)
                 assigned_obs.add(c)
 
         for i, trk in enumerate(self.tracks):
             if i not in assigned_tracks:
+                if trk.status in ("STATIONARY_LOCKED", "STATIC_VITAL"):
+                    if self.instant_vital_snr >= 3.5 or trk.presence_hold_remaining > 0:
+                        trk.presence_hold_remaining = max(0.0, trk.presence_hold_remaining - 0.1)
+                        trk.missed_count = 0
+                        continue
                 trk.missed_count += 1
 
-        # Spawn new tracks up to unbounded target_cap
+        # Spawn new tracks up to unbounded target_cap with spatial separation > 0.85m
         for j in range(n_obs):
             if j not in assigned_obs and len(self.tracks) < target_cap:
-                trk = TargetTrack(self.next_track_id, candidate_obs[j], dt=self.dt)
-                self.next_track_id += 1
-                trk.spatial_subcarrier_weights = comp_weights[j]
-                trk.status = "MOVING"
-                self.tracks.append(trk)
+                obs = candidate_obs[j]
+                min_dist_to_existing = min([float(np.linalg.norm(t.kf_state[:2] - obs)) for t in self.tracks], default=999.0)
+                if min_dist_to_existing > 0.85:
+                    new_trk = TargetTrack(self.next_track_id, obs, dt=self.dt)
+                    self.next_track_id += 1
+                    new_trk.spatial_subcarrier_weights = comp_weights[j]
+                    new_trk.status = "MOVING"
+                    new_trk.identity_label = "UNKNOWN TARGET"
+                    new_trk.locked_identity = None
+                    self.tracks.append(new_trk)
 
         # Enforce exact 1-target track count when crowd_k == 1
         if target_cap == 1 and len(self.tracks) > 1:
@@ -741,7 +912,7 @@ class OmniSenseDSPEngine:
             self.tracks = [self.tracks[0]]
 
         # Prune stale tracks
-        self.tracks = [t for t in self.tracks if t.missed_count <= 25]
+        self.tracks = [t for t in self.tracks if t.missed_count <= 25 or (t.status in ("STATIONARY_LOCKED", "STATIC_VITAL") and t.presence_hold_remaining > 0)]
 
         # Lock spatial subcarrier sensitivity when target transitions to quasi-stationary
         for trk in self.tracks:
@@ -878,51 +1049,88 @@ class OmniSenseDSPEngine:
                 self.enroll_remaining_sec = 0.0
             return
 
-        # B. Multi-Target Open-Set Identification
+        # B. Multi-Target Open-Set Identification with Strict Track-ID Binding
         if len(self.tracks) == 0:
             return
 
         if not self.gait_profiles:
             for trk in self.tracks:
-                if trk.status == "STATIC_VITAL":
+                if trk.status in ("STATIC_VITAL", "STATIONARY_LOCKED"):
                     trk.identity_label = "STATIC SUBJECT"
                 else:
                     trk.identity_label = "UNKNOWN TARGET"
                 trk.mahalanobis_dist = 99.9
             return
 
-        active_tracks = [t for t in self.tracks if t.missed_count <= 5 or t.status == "STATIC_VITAL"]
+        # Map of profiles locked to active tracks
+        currently_locked_profiles = {
+            t.locked_identity: t.track_id
+            for t in self.tracks
+            if t.locked_identity is not None
+        }
+
+        active_tracks = [t for t in self.tracks if t.missed_count <= 5 or t.status in ("STATIC_VITAL", "STATIONARY_LOCKED")]
         if len(active_tracks) == 0:
             return
 
-        profile_names = list(self.gait_profiles.keys())
-        dist_matrix = np.full((len(active_tracks), len(profile_names)), 99.9, dtype=np.float64)
+        # Moving unassigned tracks seeking biometric verification
+        unassigned_moving_tracks = [
+            t for t in active_tracks
+            if t.locked_identity is None and t.status == "MOVING"
+        ]
 
-        for i, trk in enumerate(active_tracks):
+        # For stationary tracks or already-locked tracks: retain their verified identity
+        for trk in active_tracks:
+            if trk.locked_identity is not None:
+                trk.identity_label = trk.locked_identity
+            elif trk.status in ("STATIC_VITAL", "STATIONARY_LOCKED"):
+                trk.identity_label = "STATIC SUBJECT"
+
+        # If there are moving unassigned tracks, evaluate against free profiles
+        free_profiles = [
+            name for name in self.gait_profiles.keys()
+            if name not in currently_locked_profiles
+        ]
+
+        if not unassigned_moving_tracks or not free_profiles:
+            for trk in unassigned_moving_tracks:
+                trk.identity_label = "UNKNOWN TARGET"
+                trk.mahalanobis_dist = 99.9
+            return
+
+        # Hungarian matching between unassigned moving tracks and free profiles
+        dist_matrix = np.full((len(unassigned_moving_tracks), len(free_profiles)), 99.9, dtype=np.float64)
+
+        for i, trk in enumerate(unassigned_moving_tracks):
             feat = self.extract_24_gait_features(window_len=100)
-            for j, name in enumerate(profile_names):
+            for j, name in enumerate(free_profiles):
                 prof = self.gait_profiles[name]
                 d_c = min(np.sqrt(max(0.0, (feat - c) @ prof['inv_cov'] @ (feat - c).T)) for c in prof['centroids'])
                 dist_matrix[i, j] = d_c
 
         row_ind, col_ind = optimize.linear_sum_assignment(dist_matrix)
-        assigned_tracks = set()
+        matched_tracks = set()
 
         for r, c in zip(row_ind, col_ind):
             d_val = float(dist_matrix[r, c])
-            active_tracks[r].mahalanobis_dist = round(d_val, 2)
-            name = profile_names[c]
+            trk = unassigned_moving_tracks[r]
+            trk.mahalanobis_dist = round(d_val, 2)
+            name = free_profiles[c]
             thresh = self.gait_profiles[name]['threshold']
 
             if d_val <= thresh:
-                active_tracks[r].identity_label = name
+                trk.identity_label = name
+                trk.locked_identity = name
+                currently_locked_profiles[name] = trk.track_id
             else:
-                active_tracks[r].identity_label = "UNKNOWN TARGET"
-            assigned_tracks.add(r)
-
-        for i, trk in enumerate(active_tracks):
-            if i not in assigned_tracks:
                 trk.identity_label = "UNKNOWN TARGET"
+                trk.locked_identity = None
+            matched_tracks.add(r)
+
+        for i, trk in enumerate(unassigned_moving_tracks):
+            if i not in matched_tracks:
+                trk.identity_label = "UNKNOWN TARGET"
+                trk.locked_identity = None
                 trk.mahalanobis_dist = 99.9
 
     # -------------------------------------------------------------------------
@@ -935,7 +1143,7 @@ class OmniSenseDSPEngine:
             self.lock_reason = "FILLING CSI RING BUFFER"
             return
 
-        active = [t for t in self.tracks if t.missed_count <= 5 or t.status == "STATIC_VITAL"]
+        active = [t for t in self.tracks if t.missed_count <= 5 or t.status in ("STATIC_VITAL", "STATIONARY_LOCKED")]
 
         # Case 1: No targets
         if len(active) == 0:
@@ -1103,7 +1311,7 @@ class OmniSenseDSPEngine:
     # -------------------------------------------------------------------------
     def get_telemetry_state(self) -> dict:
         """Serializes complete v4.0 multi-link, crowd count, digital twin & vitals telemetry."""
-        active_tracks = [t for t in self.tracks if t.missed_count <= 5 or t.status == "STATIC_VITAL"]
+        active_tracks = [t for t in self.tracks if t.missed_count <= 5 or t.status in ("STATIC_VITAL", "STATIONARY_LOCKED")]
 
         locked_tid = -1
         locked_tname = "NONE"

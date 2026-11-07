@@ -212,3 +212,148 @@ def test_5_dual_link_demultiplexing_and_benchmark_suite():
     assert r"\begin{table}" in latex
     assert r"\end{table}" in latex
     assert "OmniSense CSI v4.0" in latex
+
+
+def test_6_motion_adaptive_diagonal_loading_person_splitting():
+    """
+    Test 6: Motion-adaptive diagonal loading absorbs vigorous limb micro-Dopplers,
+    preventing 1 rapidly moving person from being falsely split into 2 or 3 targets.
+    """
+    engine = OmniSenseDSPEngine(fs=100.0)
+    engine.ref_noise_energy = 0.005
+
+    rng = np.random.default_rng(123)
+    # Dominant torso component
+    u_torso = rng.standard_normal((100, 1))
+    v_torso = rng.standard_normal((1, 50))
+    # Secondary high-frequency limb swinging burst
+    u_limb = rng.standard_normal((100, 1)) * 0.45
+    v_limb = rng.standard_normal((1, 50))
+
+    H_motion_burst = (u_torso @ v_torso * 20.0) + (u_limb @ v_limb * 7.5) + rng.standard_normal((100, 50)) * 0.25
+    crowd_res = engine.estimate_crowd_count(H_motion_burst)
+
+    assert crowd_res == 1, f"Expected strictly 1 person during motion burst, got {crowd_res}"
+
+
+def test_7_identity_hijacking_prevention_and_independent_spawning():
+    """
+    Test 7: Stationary target retains its verified identity ('OPERATOR_ALPHA'),
+    and new motion appearing outside the spatial gate spawns a distinct 'UNKNOWN TARGET'
+    without identity jumping or profile hijacking.
+    """
+    from dsp_engine import TargetTrack
+    engine = OmniSenseDSPEngine(fs=100.0)
+    engine.pkt_count = 150
+
+    # 1. Register profile OPERATOR_ALPHA
+    engine.start_gait_enrollment("OPERATOR_ALPHA", duration_sec=0.1)
+    for _ in range(15):
+        engine.enroll_windows.append(np.full(24, 1.25) + np.random.normal(0, 0.04, 24))
+    time.sleep(0.12)
+    engine.update_gait_biometrics()
+    assert "OPERATOR_ALPHA" in engine.gait_profiles
+
+    # 2. Track 1 is locked as OPERATOR_ALPHA and becomes stationary at (1.0, 3.0)
+    trk1 = TargetTrack(10, np.array([1.0, 3.0]))
+    trk1.identity_label = "OPERATOR_ALPHA"
+    trk1.locked_identity = "OPERATOR_ALPHA"
+    trk1.status = "STATIONARY_LOCKED"
+    trk1.pinned_pos = np.array([1.0, 3.0])
+    trk1.kf_state[2:] = 0.0
+    engine.tracks = [trk1]
+
+    # 3. New candidate observation appears 2.8m away at (-1.5, 4.0)
+    candidate_obs = [np.array([-1.5, 4.0])]
+    comp_weights = [np.ones(50) / 50.0]
+    engine._associate_and_update_tracks(candidate_obs, comp_weights, target_cap=2)
+
+    # Must now have exactly 2 tracks
+    assert len(engine.tracks) == 2, f"Expected 2 tracks, got {len(engine.tracks)}"
+
+    # Track 1 must still be stationary at (1.0, 3.0) with locked identity
+    t1 = next(t for t in engine.tracks if t.track_id == 10)
+    assert t1.identity_label == "OPERATOR_ALPHA"
+    assert t1.locked_identity == "OPERATOR_ALPHA"
+    assert np.allclose(t1.kf_state[:2], [1.0, 3.0], atol=0.01)
+
+    # Track 2 must be independently spawned as UNKNOWN TARGET
+    t2 = next(t for t in engine.tracks if t.track_id != 10)
+    assert t2.identity_label == "UNKNOWN TARGET"
+    assert t2.locked_identity is None
+
+    # 4. Trigger gait biometrics update: Track 2 MUST NOT hijack OPERATOR_ALPHA
+    engine.extract_24_gait_features = lambda window_len=100, custom_sig=None: np.full(24, 1.25)
+    engine.update_gait_biometrics()
+
+    assert t1.identity_label == "OPERATOR_ALPHA"
+    assert t2.identity_label == "UNKNOWN TARGET", f"Track 2 hijacked identity! Got: {t2.identity_label}"
+
+
+def test_8_stationary_target_zero_jitter_pinning():
+    """
+    Test 8: Moving target stopping transitions to STATIONARY_LOCKED, freezes coordinates
+    to prevent random walk jitter, and retains 60-second presence hold.
+    """
+    from dsp_engine import TargetTrack
+    engine = OmniSenseDSPEngine(fs=100.0)
+
+    trk = TargetTrack(1, np.array([0.5, 3.0]))
+    trk.status = "MOVING"
+    trk.kf_state[2:] = [0.02, 0.01]  # speed < 0.08 m/s
+
+    # Simulate 1.2s of near-zero velocity updates (12 cycles of 0.1s)
+    z = np.array([0.5, 3.0])
+    for _ in range(12):
+        trk.update(z, is_motion_active=False)
+
+    assert trk.status == "STATIONARY_LOCKED"
+    assert trk.pinned_pos is not None
+    assert np.allclose(trk.pinned_pos, [0.5, 3.0], atol=0.01)
+    assert trk.speed == 0.0
+
+    # Execute 20 predict cycles: position must remain clamped with zero drift
+    for _ in range(20):
+        trk.predict()
+        assert np.allclose(trk.kf_state[:2], [0.5, 3.0], atol=1e-5)
+        assert trk.speed == 0.0
+
+    assert trk.presence_hold_remaining == 60.0
+
+
+def test_9_digital_twin_synchronization_and_walls():
+    """
+    Test 9: Updating Digital Twin geometry dynamically computes metric walls,
+    positions all hardware nodes (TX1, TX2, RX, AP), and exposes them to telemetry.
+    """
+    engine = OmniSenseDSPEngine(fs=100.0)
+    twin = engine.configure_room_twin(
+        room_width=5.0,
+        room_length=7.0,
+        wall_material="DRYWALL",
+        tx1_pos=[-1.8, 0.5],
+        tx2_pos=[1.8, 0.5],
+        rx_pos=[0.0, 0.2],
+        ap_pos=[0.0, 5.5]
+    )
+
+    assert twin["room_width"] == 5.0
+    assert twin["room_length"] == 7.0
+    assert twin["wall_material"] == "DRYWALL"
+    assert twin["wall_attenuation_db"] == 4.0
+
+    # Verify 4 physical walls
+    walls = twin["walls"]
+    assert len(walls) == 4
+    # South wall: y=0, x from -2.5 to +2.5
+    s_wall = next(w for w in walls if w["name"] == "South Wall")
+    assert s_wall["x1"] == -2.5 and s_wall["x2"] == 2.5 and s_wall["y1"] == 0.0
+    # North wall: y=7.0, x from -2.5 to +2.5
+    n_wall = next(w for w in walls if w["name"] == "North Wall")
+    assert n_wall["x1"] == -2.5 and n_wall["x2"] == 2.5 and n_wall["y1"] == 7.0
+
+    # Verify nodes
+    assert twin["nodes"]["tx1"]["x"] == -1.8 and twin["nodes"]["tx1"]["y"] == 0.5
+    assert twin["nodes"]["tx2"]["x"] == 1.8 and twin["nodes"]["tx2"]["y"] == 0.5
+    assert twin["nodes"]["rx"]["x"] == 0.0 and twin["nodes"]["rx"]["y"] == 0.2
+    assert twin["nodes"]["ap"]["x"] == 0.0 and twin["nodes"]["ap"]["y"] == 5.5
